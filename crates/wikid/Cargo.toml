@@ -1,0 +1,18 @@
+[package]
+name = "wikid"
+description = "A wicked-simple daemon that exposes plain-Markdown wikis to remote agents over CLI and MCP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "wikid"
+path = "src/main.rs"
+
+[dependencies]
+wikid-core.workspace = true
+wikid-server.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true

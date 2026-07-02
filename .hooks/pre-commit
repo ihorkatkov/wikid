@@ -1,0 +1,35 @@
+#!/bin/sh
+# wikid pre-commit: every deterministic validation we have. Fail fast, loud output.
+# Runs from the repo root. Install once with: git config core.hooksPath .hooks
+set -e
+
+say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
+
+say "conflict markers (staged files)"
+if git grep --cached -nE '^(<{7}|>{7}) ' -- ':!target' 2>/dev/null; then
+	echo "error: merge conflict markers found in staged content"
+	exit 1
+fi
+
+say "cargo fmt --check"
+cargo fmt --all --check
+
+say "cargo clippy (all targets, all features, warnings are errors)"
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+say "cargo build (all targets)"
+cargo build --workspace --all-targets
+
+say "cargo test"
+cargo test --workspace --all-features --quiet
+
+say "cargo doc (private items, warnings are errors)"
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --quiet
+
+# Optional gates: run when the tool is installed, skip silently otherwise.
+if command -v cargo-machete >/dev/null 2>&1; then
+	say "cargo machete (unused dependencies)"
+	cargo machete
+fi
+
+printf '\n\033[1;32mpre-commit OK\033[0m\n'

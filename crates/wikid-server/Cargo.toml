@@ -1,0 +1,16 @@
+[package]
+name = "wikid-server"
+description = "HTTP + MCP daemon exposing wikid vaults to remote agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+wikid-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+axum.workspace = true

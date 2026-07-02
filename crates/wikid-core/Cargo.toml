@@ -1,0 +1,13 @@
+[package]
+name = "wikid-core"
+description = "Vault model, link graph, file operations, and health checks for wikid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
