@@ -1,0 +1,23 @@
+#!/bin/sh
+# wikid commit-msg: enforce conventional commits on the subject line.
+msg_file="$1"
+subject=$(head -n1 "$msg_file")
+
+# Allow git-generated subjects.
+case "$subject" in
+	"Merge "*|"Revert "*|"fixup! "*|"squash! "*) exit 0 ;;
+esac
+
+pattern='^(feat|fix|chore|refactor|test|docs|perf|style|build|ci|revert)(\([a-z0-9_./-]+\))?!?: .+'
+if ! printf '%s' "$subject" | grep -qE "$pattern"; then
+	echo "error: commit subject must follow conventional commits:"
+	echo "  <type>[(scope)][!]: <description>"
+	echo "  types: feat fix chore refactor test docs perf style build ci revert"
+	echo "got: $subject"
+	exit 1
+fi
+
+if [ ${#subject} -gt 100 ]; then
+	echo "error: commit subject exceeds 100 characters (${#subject})"
+	exit 1
+fi

@@ -1,0 +1,59 @@
+#!/bin/sh
+# wikid pre-commit: every deterministic validation we have. Fail fast, loud output.
+# Runs from the repo root. Install once with: git config core.hooksPath .hooks
+set -e
+
+say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
+
+say "conflict markers (staged files)"
+if git grep --cached -nE '^(<{7}|>{7}) ' -- ':!target' 2>/dev/null; then
+	echo "error: merge conflict markers found in staged content"
+	exit 1
+fi
+
+say "cargo fmt --check"
+cargo fmt --all --check
+
+say "cargo clippy (all targets, all features, warnings are errors)"
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+say "cargo build (all targets)"
+cargo build --workspace --all-targets
+
+say "cargo test"
+cargo test --workspace --all-features --quiet
+
+say "cargo doc (private items, warnings are errors)"
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --quiet
+
+# Optional gates: run when the tool is installed, skip silently otherwise.
+if command -v cargo-machete >/dev/null 2>&1; then
+	say "cargo machete (unused dependencies)"
+	cargo machete
+fi
+
+printf '\n\033[1;32mpre-commit OK\033[0m\n'
+
+# --- BEGIN BEADS INTEGRATION v1.0.4 ---
+# This section is managed by beads. Do not remove these markers.
+if command -v bd >/dev/null 2>&1; then
+  export BD_GIT_HOOK=1
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_bd_timeout" bd hooks run pre-commit "$@"
+    _bd_exit=$?
+    if [ $_bd_exit -eq 124 ]; then
+      echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — continuing without beads"
+      _bd_exit=0
+    fi
+  else
+    bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  fi
+  if [ $_bd_exit -eq 3 ]; then
+    echo >&2 "beads: database not initialized — skipping hook 'pre-commit'"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+fi
+# --- END BEADS INTEGRATION v1.0.4 ---
