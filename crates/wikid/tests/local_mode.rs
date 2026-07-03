@@ -285,7 +285,9 @@ fn json_errors_use_the_error_object_shape() {
 
 #[test]
 fn no_target_is_a_structured_error() {
+	let home = TempDir::new().unwrap();
 	wikid_untargeted()
+		.env("HOME", home.path())
 		.arg("status")
 		.assert()
 		.code(1)

@@ -170,10 +170,10 @@ fn configure_fork(vm: &str, branch: &str, repo_path: &str, wiki_path: &str, port
 		 git checkout -b {branch_q}\n\
 		 mkdir -p {wiki_parent}\n\
 		 if [ ! -f {wiki}/index.md ]; then\n\
-		   /home/boxd/.local/bin/wikid init {wiki}\n\
+		   /home/boxd/.cargo/bin/wikid init {wiki}\n\
 		 fi\n\
 		 pkill -x wikid >/dev/null 2>&1 || true\n\
-		 nohup /home/boxd/.local/bin/wikid --dir {wiki} serve >/tmp/wikid.log 2>&1 &\n\
+		 nohup /home/boxd/.cargo/bin/wikid --dir {wiki} serve >/tmp/wikid.log 2>&1 &\n\
 		 for i in $(seq 1 20); do\n\
 		   curl -fsS http://127.0.0.1:{port}/health >/dev/null 2>&1 && break\n\
 		   sleep 0.25\n\
