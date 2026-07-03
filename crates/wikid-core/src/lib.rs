@@ -22,8 +22,8 @@ pub use error::WikidError;
 pub use frontmatter::Frontmatter;
 pub use links::{Link, LinkKind, LinkReport};
 pub use ops::{
-	Document, EditResult, Entry, EntryKind, GlobResult, GrepMatch, GrepOptions, GrepResult, Listing, MvResult,
-	ReadLimit, RmResult, WriteResult,
+	Document, EditResult, Entry, EntryKind, GlobResult, GrepMatch, GrepOptions, GrepResult, Hashline, HashlinesResult,
+	LineEdit, Listing, MvResult, ReadLimit, RmResult, WriteResult, hash_line,
 };
 pub use status::{RecentPage, VaultStatus};
 pub use vault::Vault;

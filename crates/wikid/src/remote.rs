@@ -8,8 +8,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use wikid_core::{
-	Check, Document, EditResult, GlobResult, GrepOptions, GrepResult, HealthReport, LinkReport, Listing, MvResult,
-	RmResult, VaultStatus, WriteResult,
+	Check, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult, HealthReport, LineEdit,
+	LinkReport, Listing, MvResult, RmResult, VaultStatus, WriteResult,
 };
 
 use crate::error::CliError;
@@ -73,6 +73,17 @@ impl Remote {
 		self.get("cat", &[("path", path.to_owned()), ("full", full.to_string())])
 	}
 
+	pub fn cat_hashes(&self, path: &str, full: bool) -> Result<HashlinesResult, CliError> {
+		self.get(
+			"cat",
+			&[
+				("path", path.to_owned()),
+				("full", full.to_string()),
+				("hashes", "true".to_owned()),
+			],
+		)
+	}
+
 	pub fn grep(&self, pattern: &str, opts: &GrepOptions) -> Result<GrepResult, CliError> {
 		self.get(
 			"grep",
@@ -110,12 +121,8 @@ impl Remote {
 		self.send_json("PUT", "pages", json!({"path": path, "content": content}))
 	}
 
-	pub fn edit(&self, path: &str, old: &str, new: &str, all: bool) -> Result<EditResult, CliError> {
-		self.send_json(
-			"POST",
-			"edit",
-			json!({"path": path, "old": old, "new": new, "all": all}),
-		)
+	pub fn edit(&self, path: &str, edits: &[LineEdit]) -> Result<EditResult, CliError> {
+		self.send_json("POST", "edit", json!({"path": path, "edits": edits}))
 	}
 
 	pub fn mv(&self, from: &str, to: &str, force: bool) -> Result<MvResult, CliError> {

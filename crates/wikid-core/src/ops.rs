@@ -3,7 +3,6 @@
 //! `--json` output, HTTP response bodies, and remote-client parsing all use
 //! these exact shapes.
 
-use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -16,8 +15,8 @@ use crate::vault::Vault;
 
 /// Bytes sniffed for a NUL byte to classify a file as binary.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
-/// Minimum bigram-overlap score for a nearest-line hint to be offered.
-const NEAREST_LINE_MIN_SCORE: f64 = 0.3;
+/// Hex characters of the SHA-256 digest used as a line hash.
+const LINE_HASH_LEN: usize = 12;
 
 /// What a listing entry is: a directory, a page (`.md`), or any other file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,12 +167,53 @@ pub struct WriteResult {
 	pub bytes: u64,
 }
 
+/// One line of a hash-addressed read (`cat` with hashes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hashline {
+	/// 1-based line number.
+	pub line: usize,
+	/// First 12 hex characters of the SHA-256 of the line text (no EOL).
+	pub hash: String,
+	/// The line text, without its line ending.
+	pub text: String,
+}
+
+/// Result of `cat` with hashes: the page as hash-addressed lines, ready to
+/// be targeted by `edit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HashlinesResult {
+	/// Vault-relative path.
+	pub path: String,
+	/// Hash-addressed lines, possibly truncated (see `truncated`).
+	pub lines: Vec<Hashline>,
+	/// Whether `lines` was cut by a `ReadLimit`.
+	pub truncated: bool,
+	/// Line count of the full file.
+	pub total_lines: usize,
+	/// Byte size of the full file.
+	pub total_bytes: u64,
+	/// Last modification time, RFC3339 UTC.
+	pub modified: String,
+}
+
+/// One line replacement in an `edit` batch, addressed by line number and
+/// guarded by the hash the caller saw when reading.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineEdit {
+	/// 1-based line number to replace.
+	pub line: usize,
+	/// Hash the caller read for that line (from `cat` with hashes).
+	pub expected_hash: String,
+	/// Replacement text; may contain newlines to expand one line into many.
+	pub new_text: String,
+}
+
 /// Result of `edit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditResult {
 	/// Vault-relative path edited.
 	pub path: String,
-	/// Number of occurrences replaced.
+	/// Number of lines replaced.
 	pub replacements: usize,
 	/// Byte size of the file after the edit.
 	pub bytes: u64,
@@ -434,17 +474,38 @@ impl Vault {
 		})
 	}
 
-	/// Literal (non-regex) string replacement. With `all` false the old text
-	/// must occur exactly once: zero occurrences fail with `NoMatch` (plus a
-	/// best-effort nearest-line hint), several with `Ambiguous`. With `all`
-	/// true every occurrence is replaced. The write is atomic.
-	pub fn edit(&self, path: &str, old: &str, new: &str, all: bool) -> Result<EditResult, WikidError> {
-		if old.is_empty() {
-			return Err(WikidError::BadPattern {
-				pattern: String::new(),
-				reason: "old text must not be empty".into(),
-			});
-		}
+	/// Reads a file as hash-addressed lines: each line paired with its 1-based
+	/// number and the hash `edit` expects. `limit` semantics match `cat`.
+	pub fn cat_hashes(&self, path: &str, limit: Option<ReadLimit>) -> Result<HashlinesResult, WikidError> {
+		let doc = self.cat(path, limit)?;
+		let lines = split_lines(&doc.content)
+			.0
+			.into_iter()
+			.enumerate()
+			.map(|(i, text)| Hashline {
+				line: i + 1,
+				hash: hash_line(text),
+				text: text.to_string(),
+			})
+			.collect();
+		Ok(HashlinesResult {
+			path: doc.path,
+			lines,
+			truncated: doc.truncated,
+			total_lines: doc.total_lines,
+			total_bytes: doc.total_bytes,
+			modified: doc.modified,
+		})
+	}
+
+	/// Hash-guarded line replacement. Each edit names a 1-based line and the
+	/// hash the caller read for it (via `cat_hashes`); the batch applies
+	/// all-or-nothing — if any hash is stale the whole edit is refused with
+	/// `StaleEdit`, and structural problems (empty batch, line out of range,
+	/// duplicate lines) are refused with `BadEdit`. Replacement text may span
+	/// multiple lines. Line endings (CRLF vs LF) and the presence of a final
+	/// newline are preserved. The write is atomic.
+	pub fn edit(&self, path: &str, edits: &[LineEdit]) -> Result<EditResult, WikidError> {
 		let target = self.resolve(path)?;
 		if !target.abs.exists() {
 			return Err(WikidError::NotFound { path: target.rel });
@@ -455,30 +516,67 @@ impl Vault {
 				reason: "is a directory, not a file".into(),
 			});
 		}
+		if edits.is_empty() {
+			return Err(WikidError::BadEdit {
+				path: target.rel,
+				reason: "no edits given".into(),
+			});
+		}
 		let bytes = fs::read(&target.abs)?;
 		let text = String::from_utf8(bytes).map_err(|_| WikidError::NotUtf8 {
 			path: target.rel.clone(),
 		})?;
-		let count = text.matches(old).count();
-		match (count, all) {
-			(0, _) => Err(WikidError::NoMatch {
-				path: target.rel,
-				nearest_line: nearest_line(&text, old),
-			}),
-			(1, _) | (_, true) => {
-				let updated = text.replace(old, new);
-				atomic_write(&target.abs, &updated)?;
-				Ok(EditResult {
+		let (lines, eol, trailing_newline) = split_lines(&text);
+		let mut seen = std::collections::HashSet::new();
+		for edit in edits {
+			if edit.line == 0 || edit.line > lines.len() {
+				return Err(WikidError::BadEdit {
 					path: target.rel,
-					replacements: count,
-					bytes: updated.len() as u64,
-				})
+					reason: format!("line {} is out of range (page has {} lines)", edit.line, lines.len()),
+				});
 			}
-			(count, false) => Err(WikidError::Ambiguous {
-				path: target.rel,
-				count,
-			}),
+			if !seen.insert(edit.line) {
+				return Err(WikidError::BadEdit {
+					path: target.rel,
+					reason: format!("line {} is edited twice in one batch", edit.line),
+				});
+			}
 		}
+		let stale: Vec<String> = edits
+			.iter()
+			.filter_map(|edit| {
+				let actual = hash_line(lines[edit.line - 1]);
+				(!edit.expected_hash.eq_ignore_ascii_case(&actual)).then(|| {
+					format!(
+						"line {} is now {} ({:?}), not {}",
+						edit.line,
+						actual,
+						lines[edit.line - 1],
+						edit.expected_hash
+					)
+				})
+			})
+			.collect();
+		if !stale.is_empty() {
+			return Err(WikidError::StaleEdit {
+				path: target.rel,
+				detail: stale.join("; "),
+			});
+		}
+		let mut updated: Vec<&str> = lines;
+		for edit in edits {
+			updated[edit.line - 1] = &edit.new_text;
+		}
+		let mut content = updated.join(eol);
+		if trailing_newline {
+			content.push_str(eol);
+		}
+		atomic_write(&target.abs, &content)?;
+		Ok(EditResult {
+			path: target.rel,
+			replacements: edits.len(),
+			bytes: content.len() as u64,
+		})
 	}
 
 	/// Renames a file (never a directory). Destination parent directories are
@@ -675,33 +773,33 @@ fn atomic_write(abs: &Path, content: &str) -> Result<(), WikidError> {
 	Ok(())
 }
 
-/// Best-effort locator for edit misses: the 1-based line most similar to the
-/// first non-empty line of the needle, by character-bigram Dice overlap.
-fn nearest_line(text: &str, old: &str) -> Option<usize> {
-	let needle = old.lines().find(|l| !l.trim().is_empty())?.trim();
-	let needle_bigrams = bigrams(needle);
-	if needle_bigrams.is_empty() {
-		return None;
+/// The line hash used by `cat_hashes` and `edit`: the first 12 hex
+/// characters of the SHA-256 of the line text (without its line ending).
+pub fn hash_line(text: &str) -> String {
+	use sha2::{Digest, Sha256};
+	let digest = Sha256::digest(text.as_bytes());
+	let mut hex = String::with_capacity(LINE_HASH_LEN);
+	for byte in digest.iter().take(LINE_HASH_LEN.div_ceil(2)) {
+		hex.push_str(&format!("{byte:02x}"));
 	}
-	let mut best: Option<(usize, f64)> = None;
-	for (i, line) in text.lines().enumerate() {
-		let line_bigrams = bigrams(line.trim());
-		if line_bigrams.is_empty() {
-			continue;
-		}
-		let overlap = needle_bigrams.intersection(&line_bigrams).count();
-		let score = 2.0 * overlap as f64 / (needle_bigrams.len() + line_bigrams.len()) as f64;
-		if best.is_none_or(|(_, s)| score > s) {
-			best = Some((i + 1, score));
-		}
-	}
-	best.filter(|&(_, score)| score >= NEAREST_LINE_MIN_SCORE)
-		.map(|(line, _)| line)
+	hex.truncate(LINE_HASH_LEN);
+	hex
 }
 
-fn bigrams(s: &str) -> HashSet<(char, char)> {
-	let chars: Vec<char> = s.chars().collect();
-	chars.windows(2).map(|w| (w[0], w[1])).collect()
+/// Splits text into lines (without endings), reporting the dominant line
+/// ending and whether the text ends with a newline — enough for `edit` to
+/// reassemble the file byte-compatibly for LF or CRLF content.
+fn split_lines(text: &str) -> (Vec<&str>, &'static str, bool) {
+	let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+	let trailing_newline = text.ends_with('\n');
+	if text.is_empty() {
+		return (Vec::new(), eol, false);
+	}
+	let mut lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+	if trailing_newline {
+		lines.pop();
+	}
+	(lines, eol, trailing_newline)
 }
 
 #[cfg(test)]
@@ -964,7 +1062,16 @@ mod tests {
 		vault.write("index.md", "overwritten\n").unwrap();
 		let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
 		assert_eq!(mode, 0o644, "write reset the file mode");
-		vault.edit("index.md", "overwritten", "edited", false).unwrap();
+		vault
+			.edit(
+				"index.md",
+				&[LineEdit {
+					line: 1,
+					expected_hash: hash_line("overwritten"),
+					new_text: "edited".into(),
+				}],
+			)
+			.unwrap();
 		let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
 		assert_eq!(mode, 0o644, "edit reset the file mode");
 	}
@@ -1199,69 +1306,151 @@ mod tests {
 		));
 	}
 
-	// --- edit ---
+	// --- cat_hashes / edit ---
+
+	/// A `LineEdit` targeting `line` with the hash of `current` (the text the
+	/// caller believes is there).
+	fn line_edit(line: usize, current: &str, new_text: &str) -> LineEdit {
+		LineEdit {
+			line,
+			expected_hash: hash_line(current),
+			new_text: new_text.to_string(),
+		}
+	}
 
 	#[test]
-	fn edit_single_match_replaces() {
+	fn cat_hashes_numbers_and_hashes_every_line() {
+		let (_dir, vault) = fixture();
+		let result = vault.cat_hashes("projects/alpha.md", None).unwrap();
+		assert_eq!(result.lines.len(), ALPHA_MD.lines().count());
+		assert_eq!(result.total_lines, result.lines.len());
+		// "alpha status: green" is line 7 of the fixture page.
+		let seventh = &result.lines[6];
+		assert_eq!(seventh.line, 7);
+		assert_eq!(seventh.text, "alpha status: green");
+		assert_eq!(seventh.hash, hash_line("alpha status: green"));
+		assert_eq!(seventh.hash.len(), 12);
+		assert!(seventh.hash.chars().all(|c| c.is_ascii_hexdigit()));
+	}
+
+	#[test]
+	fn cat_hashes_respects_read_limits() {
+		let (_dir, vault) = fixture();
+		let limit = ReadLimit {
+			max_lines: 3,
+			max_bytes: 32 * 1024,
+		};
+		let result = vault.cat_hashes("projects/alpha.md", Some(limit)).unwrap();
+		assert_eq!(result.lines.len(), 3);
+		assert!(result.truncated);
+		assert_eq!(result.total_lines, ALPHA_MD.lines().count());
+	}
+
+	#[test]
+	fn edit_replaces_the_targeted_lines() {
 		let (_dir, vault) = fixture();
 		let result = vault
-			.edit("projects/alpha.md", "status: green", "status: blue", false)
+			.edit(
+				"projects/alpha.md",
+				&[
+					line_edit(7, "alpha status: green", "alpha status: blue"),
+					line_edit(8, "second alpha line", "revised second line"),
+				],
+			)
 			.unwrap();
-		assert_eq!(result.replacements, 1);
-		let doc = vault.cat("projects/alpha.md", None).unwrap();
-		assert!(doc.content.contains("status: blue"));
-		assert!(!doc.content.contains("status: green"));
-		assert_eq!(result.bytes, doc.total_bytes);
-	}
-
-	#[test]
-	fn edit_zero_matches_hints_nearest_line() {
-		let (_dir, vault) = fixture();
-		let err = vault
-			.edit("projects/alpha.md", "alpha status: red", "x", false)
-			.unwrap_err();
-		// "alpha status: green" is line 7 of the fixture page.
-		assert_eq!(ALPHA_MD.lines().nth(6), Some("alpha status: green"));
-		assert!(
-			matches!(
-				err,
-				WikidError::NoMatch {
-					nearest_line: Some(7),
-					..
-				}
-			),
-			"got {err:?}"
-		);
-		assert!(err.hint().unwrap().contains("line 7"));
-	}
-
-	#[test]
-	fn edit_zero_matches_without_similar_content() {
-		let (_dir, vault) = fixture();
-		let err = vault
-			.edit("projects/alpha.md", "zzzz qqqq wwww", "x", false)
-			.unwrap_err();
-		assert!(
-			matches!(err, WikidError::NoMatch { nearest_line: None, .. }),
-			"got {err:?}"
-		);
-	}
-
-	#[test]
-	fn edit_multiple_matches_is_ambiguous_unless_all() {
-		let (_dir, vault) = fixture();
-		let err = vault.edit("projects/alpha.md", "alpha", "beta", false).unwrap_err();
-		assert!(matches!(err, WikidError::Ambiguous { count: 2, .. }), "got {err:?}");
-		let result = vault.edit("projects/alpha.md", "alpha", "beta", true).unwrap();
 		assert_eq!(result.replacements, 2);
+		let doc = vault.cat("projects/alpha.md", None).unwrap();
+		assert!(doc.content.contains("alpha status: blue"));
+		assert!(doc.content.contains("revised second line"));
+		assert!(!doc.content.contains("green"));
+		assert_eq!(result.bytes, doc.total_bytes);
+		// The untouched lines and the final newline survive byte-for-byte.
+		assert!(doc.content.starts_with("---\ntitle: Alpha\n---\n"));
+		assert!(doc.content.ends_with('\n'));
+	}
+
+	#[test]
+	fn edit_refuses_the_whole_batch_when_any_hash_is_stale() {
+		let (_dir, vault) = fixture();
+		let err = vault
+			.edit(
+				"projects/alpha.md",
+				&[
+					line_edit(7, "alpha status: green", "alpha status: blue"),
+					line_edit(8, "some text that is not there", "x"),
+				],
+			)
+			.unwrap_err();
+		let WikidError::StaleEdit { detail, .. } = &err else {
+			panic!("got {err:?}");
+		};
+		assert!(detail.contains("line 8"), "detail: {detail}");
+		assert!(detail.contains(&hash_line("second alpha line")), "detail: {detail}");
+		// All-or-nothing: line 7 must not have been touched.
 		let content = vault.cat("projects/alpha.md", None).unwrap().content;
-		assert!(!content.contains("alpha"));
+		assert!(content.contains("alpha status: green"));
+	}
+
+	#[test]
+	fn edit_rejects_structurally_invalid_batches() {
+		let (_dir, vault) = fixture();
+		let err = vault.edit("projects/alpha.md", &[]).unwrap_err();
+		assert!(matches!(err, WikidError::BadEdit { .. }), "got {err:?}");
+		let err = vault.edit("projects/alpha.md", &[line_edit(99, "x", "y")]).unwrap_err();
+		assert!(matches!(err, WikidError::BadEdit { .. }), "got {err:?}");
+		assert!(err.to_string().contains("out of range"));
+		let err = vault
+			.edit(
+				"projects/alpha.md",
+				&[line_edit(7, "alpha status: green", "a"), line_edit(7, "b", "c")],
+			)
+			.unwrap_err();
+		assert!(matches!(err, WikidError::BadEdit { .. }), "got {err:?}");
+		assert!(err.to_string().contains("twice"));
+	}
+
+	#[test]
+	fn edit_hash_comparison_is_case_insensitive() {
+		let (_dir, vault) = fixture();
+		let edit = LineEdit {
+			line: 7,
+			expected_hash: hash_line("alpha status: green").to_uppercase(),
+			new_text: "alpha status: blue".into(),
+		};
+		assert_eq!(vault.edit("projects/alpha.md", &[edit]).unwrap().replacements, 1);
+	}
+
+	#[test]
+	fn edit_multiline_replacement_expands_one_line_into_many() {
+		let (_dir, vault) = fixture();
+		vault
+			.edit(
+				"projects/alpha.md",
+				&[line_edit(8, "second alpha line", "second line\nthird line")],
+			)
+			.unwrap();
+		let doc = vault.cat("projects/alpha.md", None).unwrap();
+		assert_eq!(doc.total_lines, ALPHA_MD.lines().count() + 1);
+		assert!(doc.content.ends_with("second line\nthird line\n"));
+	}
+
+	#[test]
+	fn edit_preserves_crlf_and_missing_final_newline() {
+		let (dir, vault) = fixture();
+		std::fs::write(dir.path().join("crlf.md"), "one\r\ntwo\r\nthree").unwrap();
+		vault.edit("crlf.md", &[line_edit(2, "two", "TWO")]).unwrap();
+		assert_eq!(
+			std::fs::read_to_string(dir.path().join("crlf.md")).unwrap(),
+			"one\r\nTWO\r\nthree"
+		);
 	}
 
 	#[test]
 	fn edit_unicode_content() {
 		let (_dir, vault) = fixture();
-		let result = vault.edit("notes/unicode.md", "Київ", "Львів", false).unwrap();
+		let result = vault
+			.edit("notes/unicode.md", &[line_edit(3, "Київ — місто.", "Львів — місто.")])
+			.unwrap();
 		assert_eq!(result.replacements, 1);
 		assert!(
 			vault
@@ -1273,18 +1462,14 @@ mod tests {
 	}
 
 	#[test]
-	fn edit_rejects_empty_old_and_missing_files() {
+	fn edit_rejects_missing_and_binary_files() {
 		let (_dir, vault) = fixture();
 		assert!(matches!(
-			vault.edit("index.md", "", "x", false),
-			Err(WikidError::BadPattern { .. })
-		));
-		assert!(matches!(
-			vault.edit("nope.md", "a", "b", false),
+			vault.edit("nope.md", &[line_edit(1, "a", "b")]),
 			Err(WikidError::NotFound { .. })
 		));
 		assert!(matches!(
-			vault.edit("attachments/logo.png", "a", "b", false),
+			vault.edit("attachments/logo.png", &[line_edit(1, "a", "b")]),
 			Err(WikidError::NotUtf8 { .. })
 		));
 	}

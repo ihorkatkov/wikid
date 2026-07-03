@@ -31,22 +31,25 @@ pub enum WikidError {
 		path: String,
 	},
 
-	/// An edit found zero occurrences of the old text.
-	#[error("no match in {path}")]
-	NoMatch {
-		/// Vault-relative path of the page that was searched.
-		path: String,
-		/// Best-effort location of the most similar existing line (1-based).
-		nearest_line: Option<usize>,
-	},
-
-	/// An edit found more than one occurrence without `all`.
-	#[error("ambiguous edit in {path}: {count} matches")]
-	Ambiguous {
+	/// An edit named line hashes that no longer match the file: the page
+	/// changed since it was read. The whole batch is refused.
+	#[error("stale edit in {path}: {detail}")]
+	StaleEdit {
 		/// Vault-relative path of the page.
 		path: String,
-		/// How many occurrences were found.
-		count: usize,
+		/// Per-line mismatch report: `line N is <hash> "<text>", not <hash>`,
+		/// one clause per stale line.
+		detail: String,
+	},
+
+	/// An edit batch is structurally invalid (empty, line out of range,
+	/// duplicate line numbers).
+	#[error("bad edit in {path}: {reason}")]
+	BadEdit {
+		/// Vault-relative path of the page.
+		path: String,
+		/// Which rule the batch violated.
+		reason: String,
 	},
 
 	/// The file exists but is not valid UTF-8 (binary attachment).
@@ -78,8 +81,8 @@ impl WikidError {
 			Self::NotFound { .. } => "not_found",
 			Self::InvalidPath { .. } => "invalid_path",
 			Self::AlreadyExists { .. } => "already_exists",
-			Self::NoMatch { .. } => "no_match",
-			Self::Ambiguous { .. } => "ambiguous",
+			Self::StaleEdit { .. } => "stale_edit",
+			Self::BadEdit { .. } => "bad_edit",
 			Self::NotUtf8 { .. } => "not_utf8",
 			Self::BadPattern { .. } => "bad_pattern",
 			Self::Io(_) => "io",
@@ -95,15 +98,10 @@ impl WikidError {
 					.to_string(),
 			),
 			Self::AlreadyExists { .. } => Some("pass force to overwrite the destination".to_string()),
-			Self::NoMatch { nearest_line: Some(line), .. } => {
-				Some(format!("closest similar content is near line {line} — cat the page and copy the exact text"))
-			}
-			Self::NoMatch { nearest_line: None, .. } => {
-				Some("cat the page and copy the exact text to replace".to_string())
-			}
-			Self::Ambiguous { count, .. } => {
-				Some(format!("add surrounding context to match uniquely, or pass all to replace all {count} occurrences"))
-			}
+			Self::StaleEdit { path, .. } => Some(format!(
+				"the page changed since it was read — run cat {path} with hashes and retry with fresh line hashes"
+			)),
+			Self::BadEdit { path, .. } => Some(format!("run cat {path} with hashes to see current line numbers")),
 			Self::NotUtf8 { .. } | Self::BadPattern { .. } | Self::Io(_) => None,
 		}
 	}
@@ -126,18 +124,18 @@ mod tests {
 			),
 			(WikidError::AlreadyExists { path: "a.md".into() }, "already_exists"),
 			(
-				WikidError::NoMatch {
+				WikidError::StaleEdit {
 					path: "a.md".into(),
-					nearest_line: None,
+					detail: "line 7 changed".into(),
 				},
-				"no_match",
+				"stale_edit",
 			),
 			(
-				WikidError::Ambiguous {
+				WikidError::BadEdit {
 					path: "a.md".into(),
-					count: 3,
+					reason: "line 99 is out of range".into(),
 				},
-				"ambiguous",
+				"bad_edit",
 			),
 			(WikidError::NotUtf8 { path: "a.png".into() }, "not_utf8"),
 			(
@@ -155,26 +153,23 @@ mod tests {
 	}
 
 	#[test]
-	fn no_match_hint_carries_nearest_line() {
-		let err = WikidError::NoMatch {
+	fn stale_edit_message_carries_detail_and_hint_names_the_page() {
+		let err = WikidError::StaleEdit {
 			path: "a.md".into(),
-			nearest_line: Some(7),
+			detail: "line 7 is now 4d5e6f7a8b9c".into(),
 		};
-		assert!(err.hint().unwrap().contains("line 7"));
-		let err = WikidError::NoMatch {
-			path: "a.md".into(),
-			nearest_line: None,
-		};
-		assert!(err.hint().is_some());
+		assert!(err.to_string().contains("line 7 is now 4d5e6f7a8b9c"));
+		assert!(err.hint().unwrap().contains("a.md"));
 	}
 
 	#[test]
-	fn ambiguous_hint_carries_count() {
-		let err = WikidError::Ambiguous {
+	fn bad_edit_message_carries_reason() {
+		let err = WikidError::BadEdit {
 			path: "a.md".into(),
-			count: 4,
+			reason: "line 99 is out of range (page has 3 lines)".into(),
 		};
-		assert!(err.hint().unwrap().contains('4'));
+		assert!(err.to_string().contains("out of range"));
+		assert!(err.hint().unwrap().contains("a.md"));
 	}
 
 	#[test]

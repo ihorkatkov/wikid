@@ -220,6 +220,7 @@ fn remote_mode_matches_local_mode_end_to_end() {
 		&["tree"],
 		&["cat", "index.md"],
 		&["cat", "index.md", "--full"],
+		&["cat", "notes/alpha.md", "--hashes"],
 		&["grep", "needle"],
 		&["grep", "NEEDLE", "-i", "-l"],
 		&["grep", "is here", "-C", "1", "--limit", "1"],
@@ -248,14 +249,34 @@ fn remote_mode_matches_local_mode_end_to_end() {
 
 	// edit: a same-length swap back and forth keeps byte counts (and thus the
 	// rendered output) identical across the two invocations.
+	let needle_hash = wikid_core::hash_line("The needle is here.");
+	let peedle_hash = wikid_core::hash_line("The peedle is here.");
 	let (remote_edit, code) = remote(
 		base,
-		&["edit", "notes/alpha.md", "--old", "The needle", "--new", "The peedle"],
+		&[
+			"edit",
+			"notes/alpha.md",
+			"--line",
+			"3",
+			"--hash",
+			&needle_hash,
+			"--new",
+			"The peedle is here.",
+		],
 	);
 	assert_eq!(code, 0);
 	let (local_edit, code) = local(
 		vault.path(),
-		&["edit", "notes/alpha.md", "--old", "The peedle", "--new", "The needle"],
+		&[
+			"edit",
+			"notes/alpha.md",
+			"--line",
+			"3",
+			"--hash",
+			&peedle_hash,
+			"--new",
+			"The needle is here.",
+		],
 	);
 	assert_eq!(code, 0);
 	assert_eq!(remote_edit, local_edit, "edit parity");
@@ -311,12 +332,25 @@ fn remote_mode_matches_local_mode_end_to_end() {
 	let (remote_err, remote_code) = remote(base, &["cat", "nope.md", "--json"]);
 	let (local_err, local_code) = local(vault.path(), &["cat", "nope.md", "--json"]);
 	assert_eq!((remote_err, remote_code), (local_err, local_code));
-	let (remote_err, _) = remote(base, &["edit", "notes/alpha.md", "--old", "needle", "--new", "pin"]);
-	let (local_err, _) = local(
-		vault.path(),
-		&["edit", "notes/alpha.md", "--old", "needle", "--new", "pin"],
+	let stale_args = &[
+		"edit",
+		"notes/alpha.md",
+		"--line",
+		"3",
+		"--hash",
+		"000000000000",
+		"--new",
+		"pin",
+	];
+	let (remote_err, remote_code) = remote(base, stale_args);
+	let (local_err, local_code) = local(vault.path(), stale_args);
+	assert_eq!(remote_code, 1);
+	assert!(remote_err.starts_with("error[stale_edit]:"), "{remote_err}");
+	assert_eq!(
+		(remote_err, remote_code),
+		(local_err, local_code),
+		"stale-edit error parity"
 	);
-	assert_eq!(remote_err, local_err, "ambiguous-edit error parity");
 }
 
 /// Remote targeting purely via `WIKID_SERVER`/`WIKID_TOKEN`/`WIKID_WIKI` env

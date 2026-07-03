@@ -248,7 +248,13 @@ fn json_output_parses_for_every_command() {
 	assert_eq!(glob["total"], 4);
 	let write = json_of(wikid(vault.path()).args(["write", "new.md", "-m", "fresh", "--json"]));
 	assert_eq!(write["created"], true);
-	let edit = json_of(wikid(vault.path()).args(["edit", "new.md", "--old", "fresh", "--new", "stale", "--json"]));
+	let hashes = json_of(wikid(vault.path()).args(["cat", "new.md", "--hashes", "--json"]));
+	assert_eq!(hashes["lines"][0]["line"], 1);
+	assert_eq!(hashes["lines"][0]["text"], "fresh");
+	let hash = hashes["lines"][0]["hash"].as_str().unwrap().to_owned();
+	let edit = json_of(wikid(vault.path()).args([
+		"edit", "new.md", "--line", "1", "--hash", &hash, "--new", "stale", "--json",
+	]));
 	assert_eq!(edit["replacements"], 1);
 	let mv = json_of(wikid(vault.path()).args(["mv", "new.md", "old.md", "--json"]));
 	assert_eq!(mv["from"], "new.md");
@@ -887,47 +893,56 @@ fn write_rejects_escaping_and_hidden_paths() {
 }
 
 #[test]
-fn edit_replaces_unique_match_and_reports_ambiguity_and_misses() {
+fn cat_hashes_lists_line_number_hash_and_text_with_the_edit_hint() {
 	let vault = fixture_vault();
-	wikid(vault.path())
-		.args(["edit", "notes/alpha.md", "--old", "is here", "--new", "was here"])
-		.assert()
-		.success()
-		.stdout(predicate::str::contains("edited notes/alpha.md: 1 replacement"));
-	let content = fs::read_to_string(vault.path().join("notes/alpha.md")).unwrap();
-	assert!(content.contains("The needle was here."));
-	// Two occurrences of "needle" without --all → ambiguous, file untouched.
-	wikid(vault.path())
-		.args(["edit", "notes/alpha.md", "--old", "needle", "--new", "pin"])
-		.assert()
-		.code(1)
-		.stdout(predicate::str::starts_with("error[ambiguous]:"))
-		.stdout(predicate::str::contains("2 matches"));
+	let out = stdout_of(wikid(vault.path()).args(["cat", "notes/alpha.md", "--hashes"]));
+	let hash = wikid_core::hash_line("The needle is here.");
+	assert!(out.contains(&format!("3:{hash}: The needle is here.")), "{out}");
 	assert!(
-		fs::read_to_string(vault.path().join("notes/alpha.md"))
-			.unwrap()
-			.contains("needle")
+		out.contains("hint: wikid edit notes/alpha.md --line <n> --hash <hash> --new <text>"),
+		"{out}"
 	);
-	// Zero occurrences → no_match with the nearest-line hint.
-	wikid(vault.path())
-		.args(["edit", "notes/alpha.md", "--old", "The needle is gone", "--new", "x"])
-		.assert()
-		.code(1)
-		.stdout(predicate::str::starts_with("error[no_match]:"))
-		.stdout(predicate::str::contains("hint:"));
 }
 
 #[test]
-fn edit_all_replaces_every_occurrence() {
+fn edit_replaces_a_hash_addressed_line_and_rejects_stale_or_bad_targets() {
 	let vault = fixture_vault();
+	let hash = wikid_core::hash_line("The needle is here.");
 	wikid(vault.path())
-		.args(["edit", "notes/alpha.md", "--old", "needle", "--new", "pin", "--all"])
+		.args([
+			"edit",
+			"notes/alpha.md",
+			"--line",
+			"3",
+			"--hash",
+			&hash,
+			"--new",
+			"The needle was here.",
+		])
 		.assert()
 		.success()
-		.stdout(predicate::str::contains("2 replacements"));
+		.stdout(predicate::str::contains("edited notes/alpha.md: 1 line replaced"));
 	let content = fs::read_to_string(vault.path().join("notes/alpha.md")).unwrap();
-	assert!(!content.contains("needle"));
-	assert_eq!(content.matches("pin").count(), 2);
+	assert!(content.contains("The needle was here."));
+	// Reusing the now-stale hash → refused, file untouched.
+	wikid(vault.path())
+		.args(["edit", "notes/alpha.md", "--line", "3", "--hash", &hash, "--new", "x"])
+		.assert()
+		.code(1)
+		.stdout(predicate::str::starts_with("error[stale_edit]:"))
+		.stdout(predicate::str::contains("hint:"));
+	assert_eq!(
+		fs::read_to_string(vault.path().join("notes/alpha.md")).unwrap(),
+		content,
+		"a refused edit must not touch the file"
+	);
+	// Out-of-range line → bad_edit pointing back at cat --hashes.
+	wikid(vault.path())
+		.args(["edit", "notes/alpha.md", "--line", "99", "--hash", &hash, "--new", "x"])
+		.assert()
+		.code(1)
+		.stdout(predicate::str::starts_with("error[bad_edit]:"))
+		.stdout(predicate::str::contains("cat notes/alpha.md"));
 }
 
 #[test]

@@ -45,7 +45,7 @@
 
 ## 4. Operation surface
 
-Design principle: **as close to a filesystem as possible.** The surface mirrors the primitives coding agents already use natively (ls / cat / grep / glob / write / string-replace edit), because remote agents lose their native file tools and need equivalents. No section-level addressing as a special API — surgical edits happen via string-replace, same as local file editing. Optimal use is the harness author's responsibility.
+Design principle: **as close to a filesystem as possible.** The surface mirrors the primitives coding agents already use natively (ls / cat / grep / glob / write / surgical edit), because remote agents lose their native file tools and need equivalents. No section-level addressing as a special API — surgical edits are hash-guarded line replacements: read line hashes with `cat --hashes`, then replace lines by number + hash. A stale hash refuses the edit, so concurrent writers can't silently clobber each other. Optimal use is the harness author's responsibility.
 
 Commands (CLI verbs ≙ MCP tools ≙ HTTP endpoints):
 
@@ -57,7 +57,7 @@ Commands (CLI verbs ≙ MCP tools ≙ HTTP endpoints):
 | `grep <pattern>` | Search content; ranked-lite (title/path matches boosted), match context, total hit count, explicit zero-result message. (AXI #5) |
 | `glob <pattern>` | Find pages by path pattern. |
 | `write <path>` | Create/overwrite a page (content from stdin or arg). Atomic. |
-| `edit <path>` | String-replace edit (old → new, uniqueness-checked), the safe surgical-write primitive. |
+| `edit <path>` | Hash-guarded line replacement (line number + expected hash → new text; stale hash refuses the whole edit), the safe surgical-write primitive. |
 | `mv`, `rm` | Rename/delete. `rm` is the one destructive verb — requires `--force` flag (never an interactive prompt, AXI #6). |
 | `links <path>` | Outgoing links + backlinks for a page (from the wikilink graph). |
 | `doctor` | Health checks — see §5. |

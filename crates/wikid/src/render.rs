@@ -6,8 +6,8 @@
 //! caller prints it with `println!`.
 
 use wikid_core::{
-	Document, EditResult, Entry, EntryKind, GlobResult, GrepResult, HealthReport, LinkReport, Listing, MvResult,
-	RmResult, Severity, VaultStatus, WriteResult,
+	Document, EditResult, Entry, EntryKind, GlobResult, GrepResult, HashlinesResult, HealthReport, LinkReport, Listing,
+	MvResult, RmResult, Severity, VaultStatus, WriteResult,
 };
 
 /// Formats bytes as a compact human size (B / KiB / MiB).
@@ -166,7 +166,7 @@ pub fn edit(result: &EditResult) -> String {
 	let plural = if result.replacements == 1 { "" } else { "s" };
 	[
 		format!(
-			"edited {}: {} replacement{plural} ({})",
+			"edited {}: {} line{plural} replaced ({})",
 			result.path,
 			result.replacements,
 			human_size(result.bytes)
@@ -174,6 +174,25 @@ pub fn edit(result: &EditResult) -> String {
 		format!("hint: wikid cat {} — verify the change", result.path),
 	]
 	.join("\n")
+}
+
+pub fn hashlines(result: &HashlinesResult) -> String {
+	let mut lines: Vec<String> = result
+		.lines
+		.iter()
+		.map(|l| format!("{}:{}: {}", l.line, l.hash, l.text))
+		.collect();
+	if result.truncated {
+		lines.push(format!(
+			"… truncated ({} lines / {} bytes total) — use --full",
+			result.total_lines, result.total_bytes
+		));
+	}
+	lines.push(format!(
+		"hint: wikid edit {} --line <n> --hash <hash> --new <text> — replace a line",
+		result.path
+	));
+	lines.join("\n")
 }
 
 pub fn mv(result: &MvResult) -> String {
@@ -345,18 +364,44 @@ mod tests {
 	}
 
 	#[test]
-	fn edit_pluralizes_replacements() {
+	fn edit_pluralizes_replaced_lines() {
 		let one = EditResult {
 			path: "a.md".to_string(),
 			replacements: 1,
 			bytes: 10,
 		};
-		assert!(edit(&one).contains("1 replacement ("));
+		assert!(edit(&one).contains("1 line replaced ("));
 		let many = EditResult {
 			path: "a.md".to_string(),
 			replacements: 3,
 			bytes: 10,
 		};
-		assert!(edit(&many).contains("3 replacements ("));
+		assert!(edit(&many).contains("3 lines replaced ("));
+	}
+
+	#[test]
+	fn hashlines_render_line_hash_text_with_truncation_and_hint() {
+		let result = HashlinesResult {
+			path: "a.md".to_string(),
+			lines: vec![wikid_core::Hashline {
+				line: 1,
+				hash: "abcdef012345".to_string(),
+				text: "# Alpha".to_string(),
+			}],
+			truncated: true,
+			total_lines: 500,
+			total_bytes: 4242,
+			modified: "2026-07-02T10:00:00Z".to_string(),
+		};
+		let out = hashlines(&result);
+		assert!(out.starts_with("1:abcdef012345: # Alpha"), "{out}");
+		assert!(
+			out.contains("… truncated (500 lines / 4242 bytes total) — use --full"),
+			"{out}"
+		);
+		assert!(
+			out.ends_with("hint: wikid edit a.md --line <n> --hash <hash> --new <text> — replace a line"),
+			"{out}"
+		);
 	}
 }

@@ -21,6 +21,7 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 regex = "1"
+sha2 = "0.10"
 globset = "0.4"
 ignore = "0.4"
 tempfile = "3"

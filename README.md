@@ -6,7 +6,7 @@
 
 **Give every coding agent on every machine one shared, plain-Markdown knowledge base.**
 
-Your agents — Claude Code, Codex, anything with a shell — already know `ls`, `cat`, `grep`, and string-replace edits. wikid puts those exact primitives on the wire: point `wikid serve` at a directory of Markdown files (an Obsidian vault works as-is) and every agent everywhere reads and writes the same wiki, live. No clone, no pull, no push, no database, no git required, no lock-in — the wiki stays plain files the whole time.
+Your agents — Claude Code, Codex, anything with a shell — already know `ls`, `cat`, `grep`, and surgical line edits. wikid puts those exact primitives on the wire: point `wikid serve` at a directory of Markdown files (an Obsidian vault works as-is) and every agent everywhere reads and writes the same wiki, live. No clone, no pull, no push, no database, no git required, no lock-in — the wiki stays plain files the whole time.
 
 It's the natural home for a [Karpathy-style LLM wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): a knowledge base your agents maintain for themselves, except now it's one wiki shared across all of them instead of a copy per machine.
 
@@ -61,7 +61,8 @@ export WIKID_WIKI=notes
 wikid status
 wikid grep "auth flow"
 wikid cat architecture.md
-wikid edit decisions.md --old "status: draft" --new "status: final"
+wikid cat decisions.md --hashes            # each line as line:hash: text
+wikid edit decisions.md --line 4 --hash 3b39a78cfdcb --new "status: final"
 ```
 
 (`--server`, `--token`, and `--wiki` flags work too. Network exposure is your choice: localhost, tailscale, or public + TLS.)
@@ -124,7 +125,7 @@ Every command works identically in local and remote mode, and every command take
 | `ls` / `tree` / `glob` | Find pages by path |
 | `cat` | Read a page (large files truncated with a size hint; `--full` to override) |
 | `grep` | Regex search with ranked results and match context |
-| `write` / `edit` | Create pages; surgical string-replace edits, uniqueness-checked |
+| `write` / `edit` | Create pages; hash-guarded line edits — a stale hash refuses the edit, so concurrent writers never silently clobber each other |
 | `mv` / `rm` | Rename and delete (`rm` requires `--force` — never an interactive prompt) |
 | `links` | Outgoing links and backlinks from the wikilink graph |
 | `doctor` | Structural health checks: broken wikilinks, orphans, stale and oversized pages |

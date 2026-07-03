@@ -25,17 +25,18 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 |---|---|
 | `ls(path: Option<&str>, depth: usize)` | Listing of dirs (trailing `/`) + files at `path` (default root), recursing to `depth` (default 1; `tree` = depth 3). Entries: `path`, `kind` (`dir`/`file`/`page`), `size`, `modified` (RFC3339 UTC). Includes `total_dirs`, `total_files`, `total_pages` for the whole subtree regardless of depth (AXI: pre-computed aggregates). |
 | `cat(path, limit: Option<ReadLimit>)` | Returns `Document { path, content, truncated, total_lines, total_bytes, modified }`. Default limit 400 lines or 32 KiB (whichever first); `None` = full. |
+| `cat_hashes(path, limit: Option<ReadLimit>)` | Same read (same limits/truncation), returned as `HashlinesResult { path, lines: [{line, hash, text}], truncated, total_lines, total_bytes, modified }`. `hash` = first 12 hex chars of SHA-256 of the line text (no EOL). This is the read half of the edit protocol. |
 | `grep(pattern, opts)` | Regex search (`regex` crate) over pages + UTF-8 text files. Options: `ignore_case`, `files_only`, `context` (lines), `limit` (default 50 matches). Result: `matches: [{path, line, text}]` (+ `context_before/after` when requested), `total_matches`, `matched_files` (files with ≥1 match), `total_files` (files searched), `truncated`. Files whose path stem matches the pattern are ranked first. |
 | `glob(pattern)` | `globset` match over relative paths, e.g. `**/*.md`. Sorted by path. Returns entries + `total`. |
 | `write(path, content)` | Create or overwrite. Creates parent dirs. **Atomic**: `tempfile::NamedTempFile::new_in(parent)` + `persist`. Returns `{path, created: bool, bytes}`. |
-| `edit(path, old, new, all: bool)` | Literal (non-regex) string replacement. `all=false`: `old` must match exactly once — 0 matches → `NoMatch` (error includes a best-effort nearest-line hint), >1 → `Ambiguous { count }`. `all=true`: replace every occurrence, return count. Write is atomic as above. |
+| `edit(path, edits: &[LineEdit])` | Hash-guarded line replacement (`LineEdit { line, expected_hash, new_text }`, 1-based lines). Structural problems (empty batch, out-of-range line, duplicate line) → `BadEdit`. Every `expected_hash` must match the current line's hash (comparison is ASCII-case-insensitive); any mismatch → `StaleEdit` naming every stale line, and the whole batch is refused — all-or-nothing. `new_text` may contain `\n` (one line expands into many). EOL style (LF/CRLF) and trailing-newline presence are preserved. Write is atomic as above; returns `{path, replacements, bytes}` where `replacements` counts lines replaced. |
 | `mv(from, to, force)` | Rename file (not dirs). Creates parent dirs at destination. Destination exists and `!force` → `AlreadyExists`. |
 | `rm(path)` | Delete file (not dirs). The `--force` gate is CLI/HTTP-level, not core. |
 | `links(path)` | `LinkReport { outgoing: [{raw, target, resolved: Option<path>, kind: wikilink/markdown}], backlinks: [path] }`. Backlinks = scan all pages for links resolving to `path`. |
 | `doctor(opts)` | See §5. |
 | `status()` | `VaultStatus { root, total_pages, total_files, total_bytes, recent: [{path, modified}] (5 most recent pages), doctor_summary: {high, medium, low} }`. |
 
-**Error model** (`thiserror` enum `WikidError`): `NotFound`, `InvalidPath`, `AlreadyExists`, `NoMatch`, `Ambiguous`, `NotUtf8`, `BadPattern`, `Io`. Each maps to a stable string `code()` and an optional `hint()` (used verbatim by CLI and HTTP error bodies).
+**Error model** (`thiserror` enum `WikidError`): `NotFound`, `InvalidPath`, `AlreadyExists`, `StaleEdit`, `BadEdit`, `NotUtf8`, `BadPattern`, `Io`. Each maps to a stable string `code()` and an optional `hint()` (used verbatim by CLI and HTTP error bodies).
 
 ## 4. Core: link model (Obsidian-compatible)
 
@@ -80,11 +81,11 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 - `token show [actor]` — explicit secret-revealing local command. Defaults to `admin`; prints exactly one matching token or errors on none/multiple. JSON shape: `{actor, token, config_path}`.
 - `status`
 - `ls [path]` (depth 1), `tree [path]` (`--depth`, default 3)
-- `cat <path>` `--full`
+- `cat <path>` `--full` `--hashes` (emit `line:hash: text` per line — the read step before `edit`)
 - `grep <pattern>` `-i` `-l` `-C <n>` `--limit <n>`
 - `glob <pattern>`
 - `write <path>` (content from stdin; `-m <text>` for one-liners)
-- `edit <path> --old <s> --new <s>` `--all`
+- `edit <path> --line <n> --hash <h> --new <s>` (single line edit per invocation; batches exist at the core/HTTP level only)
 - `mv <from> <to>` `--force`
 - `rm <path> --force`
 - `links <path>`
@@ -99,30 +100,30 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
   - `GET  /v1/wikis` → `{wikis:[{name, pages}]}`
   - `GET  /v1/wikis/{wiki}/status`
   - `GET  /v1/wikis/{wiki}/ls?path=&depth=`
-  - `GET  /v1/wikis/{wiki}/cat?path=&full=`
+  - `GET  /v1/wikis/{wiki}/cat?path=&full=&hashes=` (`hashes=true` → `HashlinesResult` instead of `Document`)
   - `GET  /v1/wikis/{wiki}/grep?pattern=&ignore_case=&files_only=&context=&limit=`
   - `GET  /v1/wikis/{wiki}/glob?pattern=`
   - `GET  /v1/wikis/{wiki}/links?path=`
   - `GET  /v1/wikis/{wiki}/doctor?stale_days=&checks=`
   - `PUT  /v1/wikis/{wiki}/pages` body `{path, content}`
-  - `POST /v1/wikis/{wiki}/edit` body `{path, old, new, all}`
+  - `POST /v1/wikis/{wiki}/edit` body `{path, edits: [{line, expected_hash, new_text}]}`
   - `POST /v1/wikis/{wiki}/mv` body `{from, to, force}`
   - `DELETE /v1/wikis/{wiki}/pages?path=&force=true` (`force` missing → 400 `force_required`, the same code and shape as the CLI's `rm` refusal with wording adapted to the wire: `force=true` instead of `--force`)
-- Success bodies are the core structs serialized directly. `WikidError` → status mapping: `NotFound`/`unknown_wiki` 404, `InvalidPath`/`BadPattern`/usage 400, `AlreadyExists`/`Ambiguous` 409, `NoMatch` 404, `NotUtf8` 415, `Io` 500. Body always `{"error":{"code","message","hint"}}`.
+- Success bodies are the core structs serialized directly. `WikidError` → status mapping: `NotFound`/`unknown_wiki` 404, `InvalidPath`/`BadPattern`/`BadEdit`/usage 400, `AlreadyExists`/`StaleEdit` 409, `NotUtf8` 415, `Io` 500. Body always `{"error":{"code","message","hint"}}`.
 - Config (TOML, see `wikid-server::config`): `bind` (default `127.0.0.1:7448`), optional `default_wiki`, `[wikis] name = "/path"`, `[tokens] "actual_secret" = "actor-name"`. Actor names are logged (`tracing`) but not otherwise used in MVP — attribution is deferred by SPEC. Config rewrites preserve keys/values (comments may be lost), use temp+rename where feasible, and set Unix mode `0600`.
 - `serve` with no config found bootstraps the write target, registers cwd under its directory name (collision suffix `name-2`, `name-3`, …), generates one `admin` token from 32 bytes of `/dev/urandom` hex-encoded with `wkd_`, prints startup info without the token value, flushes stdout, then serves immediately. `serve --json` prints exactly one startup object to stdout before serving; logs must not corrupt stdout.
 - Startup validates every wiki dir exists (fail fast) and warns loudly when `tokens` is empty and bind is non-loopback (auth-less non-local serving is refused).
 
 ## 8. Testing strategy
 
-- **Core**: co-located unit tests. A `test-fixtures` helper (`#[cfg(test)]` + `pub` test-util module) builds a temp vault: nested pages with wikilinks (incl. alias, heading, ambiguous, broken), frontmatter'd + frontmatter-less pages, `.obsidian/` dir (must be invisible), a binary attachment, an oversized page, a stale page (set mtime via `filetime`-free trick: `File::set_times`). Must cover: path escapes (`../x`, absolute, symlink out), atomic write behavior, edit 0/1/n matches, grep flags + binary skip, link resolution order, every doctor check firing and not firing.
+- **Core**: co-located unit tests. A `test-fixtures` helper (`#[cfg(test)]` + `pub` test-util module) builds a temp vault: nested pages with wikilinks (incl. alias, heading, ambiguous, broken), frontmatter'd + frontmatter-less pages, `.obsidian/` dir (must be invisible), a binary attachment, an oversized page, a stale page (set mtime via `filetime`-free trick: `File::set_times`). Must cover: path escapes (`../x`, absolute, symlink out), atomic write behavior, edit hash matching (fresh/stale/case-insensitive), all-or-nothing batch refusal, structural batch validation, EOL/trailing-newline preservation, grep flags + binary skip, link resolution order, every doctor check firing and not firing.
 - **CLI**: integration tests in `crates/wikid/tests/` with `assert_cmd` + `predicates` against temp vaults. Cover the AXI checklist §6 item by item, plus `--json` validity (parse with `serde_json`) and exit codes.
 - **Server**: in-crate tests via `tower::ServiceExt::oneshot` (no port binding): auth 401, unknown wiki 404, happy paths for every route, path-escape 400, delete without force 400.
 - **End-to-end** (in `crates/wikid/tests/`): spawn `wikid serve` on an ephemeral port with a temp config, run CLI in remote mode against it, assert parity with local-mode output on the same vault.
 
 ## 9. Dependencies (locked)
 
-Workspace-level, already declared in root `Cargo.toml`. Do not add others without updating this section: `anyhow`, `thiserror`, `serde`, `serde_json`, `serde_yaml`, `toml`, `clap` (derive), `tokio`, `axum`, `regex`, `globset`, `ignore`, `tempfile`, `humantime` (RFC3339 formatting of `SystemTime`), `ureq` (json feature — sync client keeps the CLI runtime-free), `tracing`, `tracing-subscriber`; dev: `assert_cmd`, `predicates`, `tower` (util), `http-body-util`.
+Workspace-level, already declared in root `Cargo.toml`. Do not add others without updating this section: `anyhow`, `thiserror`, `serde`, `serde_json`, `serde_yaml`, `toml`, `clap` (derive), `tokio`, `axum`, `regex`, `globset`, `ignore`, `sha2` (line hashes for the edit protocol), `tempfile`, `humantime` (RFC3339 formatting of `SystemTime`), `ureq` (json feature — sync client keeps the CLI runtime-free), `tracing`, `tracing-subscriber`; dev: `assert_cmd`, `predicates`, `tower` (util), `http-body-util`.
 
 ## 10. Deferred (do not build now)
 

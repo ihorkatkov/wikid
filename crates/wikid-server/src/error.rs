@@ -103,9 +103,11 @@ impl From<WikidError> for ApiError {
 		// DESIGN §7 status mapping. `code`, `message`, and `hint` come from
 		// the core error verbatim — surfaces never invent their own wording.
 		let status = match &err {
-			WikidError::NotFound { .. } | WikidError::NoMatch { .. } => StatusCode::NOT_FOUND,
-			WikidError::InvalidPath { .. } | WikidError::BadPattern { .. } => StatusCode::BAD_REQUEST,
-			WikidError::AlreadyExists { .. } | WikidError::Ambiguous { .. } => StatusCode::CONFLICT,
+			WikidError::NotFound { .. } => StatusCode::NOT_FOUND,
+			WikidError::InvalidPath { .. } | WikidError::BadPattern { .. } | WikidError::BadEdit { .. } => {
+				StatusCode::BAD_REQUEST
+			}
+			WikidError::AlreadyExists { .. } | WikidError::StaleEdit { .. } => StatusCode::CONFLICT,
 			WikidError::NotUtf8 { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
 			WikidError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
 		};
@@ -156,14 +158,6 @@ mod tests {
 				"not_found",
 			),
 			(
-				WikidError::NoMatch {
-					path: "a.md".into(),
-					nearest_line: None,
-				},
-				StatusCode::NOT_FOUND,
-				"no_match",
-			),
-			(
 				WikidError::InvalidPath {
 					path: "../a".into(),
 					reason: "escape".into(),
@@ -185,12 +179,20 @@ mod tests {
 				"already_exists",
 			),
 			(
-				WikidError::Ambiguous {
+				WikidError::BadEdit {
 					path: "a.md".into(),
-					count: 2,
+					reason: "line 99 is out of range".into(),
+				},
+				StatusCode::BAD_REQUEST,
+				"bad_edit",
+			),
+			(
+				WikidError::StaleEdit {
+					path: "a.md".into(),
+					detail: "line 7 changed".into(),
 				},
 				StatusCode::CONFLICT,
-				"ambiguous",
+				"stale_edit",
 			),
 			(
 				WikidError::NotUtf8 { path: "a.png".into() },

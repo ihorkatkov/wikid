@@ -15,7 +15,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use wikid_core::{
-	Check, DoctorOptions, Document, EditResult, GlobResult, GrepOptions, GrepResult, HealthReport, LinkReport, Listing,
+	Check, DoctorOptions, EditResult, GlobResult, GrepOptions, GrepResult, HealthReport, LineEdit, LinkReport, Listing,
 	MvResult, ReadLimit, RmResult, Vault, VaultStatus, WriteResult,
 };
 
@@ -190,16 +190,23 @@ struct CatQuery {
 	path: String,
 	#[serde(default)]
 	full: bool,
+	#[serde(default)]
+	hashes: bool,
 }
 
 async fn cat(
 	State(state): State<Arc<AppState>>,
 	Path(wiki): Path<String>,
 	query: Result<Query<CatQuery>, QueryRejection>,
-) -> Result<Json<Document>, ApiError> {
+) -> Result<Response, ApiError> {
 	let Query(q) = query?;
 	let limit = if q.full { None } else { Some(ReadLimit::default()) };
-	Ok(Json(state.wiki(&wiki)?.cat(&q.path, limit)?))
+	let vault = state.wiki(&wiki)?;
+	if q.hashes {
+		Ok(Json(vault.cat_hashes(&q.path, limit)?).into_response())
+	} else {
+		Ok(Json(vault.cat(&q.path, limit)?).into_response())
+	}
 }
 
 #[derive(Deserialize)]
@@ -304,10 +311,7 @@ async fn write_page(
 #[derive(Deserialize)]
 struct EditBody {
 	path: String,
-	old: String,
-	new: String,
-	#[serde(default)]
-	all: bool,
+	edits: Vec<LineEdit>,
 }
 
 async fn edit(
@@ -316,7 +320,7 @@ async fn edit(
 	body: Result<Json<EditBody>, JsonRejection>,
 ) -> Result<Json<EditResult>, ApiError> {
 	let Json(b) = body?;
-	Ok(Json(state.wiki(&wiki)?.edit(&b.path, &b.old, &b.new, b.all)?))
+	Ok(Json(state.wiki(&wiki)?.edit(&b.path, &b.edits)?))
 }
 
 #[derive(Deserialize)]
@@ -366,6 +370,7 @@ mod tests {
 	use serde_json::{Value, json};
 	use tempfile::TempDir;
 	use tower::ServiceExt as _;
+	use wikid_core::Document;
 
 	use super::*;
 
@@ -573,6 +578,19 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn cat_with_hashes_returns_hashlines() {
+		let dir = vault_dir();
+		let app = test_app(&dir);
+		let (status, body) = call(&app, get_req("/v1/wikis/main/cat?path=projects/alpha.md&hashes=true")).await;
+		assert_eq!(status, StatusCode::OK);
+		let result: wikid_core::HashlinesResult = serde_json::from_value(body).unwrap();
+		assert_eq!(result.lines.len(), 4);
+		assert_eq!(result.lines[2].line, 3);
+		assert_eq!(result.lines[2].text, "alpha status: green");
+		assert_eq!(result.lines[2].hash, wikid_core::hash_line("alpha status: green"));
+	}
+
+	#[tokio::test]
 	async fn grep_finds_matches_with_options() {
 		let dir = vault_dir();
 		let app = test_app(&dir);
@@ -655,16 +673,18 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn edit_replaces_text() {
+	async fn edit_replaces_hash_addressed_lines() {
 		let dir = vault_dir();
 		let app = test_app(&dir);
-		let body = json!({"path": "projects/alpha.md", "old": "status: green", "new": "status: blue"});
+		let body = json!({"path": "projects/alpha.md", "edits": [
+			{"line": 3, "expected_hash": wikid_core::hash_line("alpha status: green"), "new_text": "alpha status: blue"}
+		]});
 		let (status, body) = call(&app, json_req(Method::POST, "/v1/wikis/main/edit", body)).await;
 		assert_eq!(status, StatusCode::OK);
 		let result: EditResult = serde_json::from_value(body).unwrap();
 		assert_eq!(result.replacements, 1);
 		let content = std::fs::read_to_string(dir.path().join("projects/alpha.md")).unwrap();
-		assert!(content.contains("status: blue"));
+		assert!(content.contains("alpha status: blue"));
 	}
 
 	#[tokio::test]
@@ -765,17 +785,21 @@ mod tests {
 		let (status, body) = call(&app, get_req("/v1/wikis/main/grep?pattern=(")).await;
 		assert_eq!(status, StatusCode::BAD_REQUEST);
 		assert_eq!(error_code(&body), "bad_pattern");
-		// Ambiguous → 409, and the hint comes from core verbatim.
-		let edit = json!({"path": "projects/alpha.md", "old": "alpha", "new": "beta"});
+		// StaleEdit → 409, and the hint comes from core verbatim.
+		let edit = json!({"path": "projects/alpha.md", "edits": [
+			{"line": 3, "expected_hash": "000000000000", "new_text": "x"}
+		]});
 		let (status, body) = call(&app, json_req(Method::POST, "/v1/wikis/main/edit", edit)).await;
 		assert_eq!(status, StatusCode::CONFLICT);
-		assert_eq!(error_code(&body), "ambiguous");
-		assert!(body["error"]["hint"].as_str().unwrap().contains('2'));
-		// NoMatch → 404
-		let edit = json!({"path": "projects/alpha.md", "old": "zzzz qqqq", "new": "x"});
+		assert_eq!(error_code(&body), "stale_edit");
+		assert!(body["error"]["hint"].as_str().unwrap().contains("hashes"));
+		// BadEdit → 400
+		let edit = json!({"path": "projects/alpha.md", "edits": [
+			{"line": 99, "expected_hash": "000000000000", "new_text": "x"}
+		]});
 		let (status, body) = call(&app, json_req(Method::POST, "/v1/wikis/main/edit", edit)).await;
-		assert_eq!(status, StatusCode::NOT_FOUND);
-		assert_eq!(error_code(&body), "no_match");
+		assert_eq!(status, StatusCode::BAD_REQUEST);
+		assert_eq!(error_code(&body), "bad_edit");
 		// AlreadyExists → 409
 		let mv = json!({"from": "index.md", "to": "projects/alpha.md"});
 		let (status, body) = call(&app, json_req(Method::POST, "/v1/wikis/main/mv", mv)).await;

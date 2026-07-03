@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use wikid_core::{
-	Check, DoctorOptions, Document, EditResult, GlobResult, GrepOptions, GrepResult, HealthReport, LinkReport, Listing,
-	MvResult, ReadLimit, RmResult, Vault, VaultStatus, WriteResult,
+	Check, DoctorOptions, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult, HealthReport,
+	LineEdit, LinkReport, Listing, MvResult, ReadLimit, RmResult, Vault, VaultStatus, WriteResult,
 };
 
 use crate::error::CliError;
@@ -84,6 +84,9 @@ enum Command {
 		/// Print the whole file instead of the first 400 lines / 32 KiB
 		#[arg(long)]
 		full: bool,
+		/// Prefix each line with its number and hash (line:hash: text) for edit
+		#[arg(long)]
+		hashes: bool,
 	},
 	/// Search page content (regex)
 	Grep {
@@ -110,18 +113,18 @@ enum Command {
 		#[arg(short = 'm', long, value_name = "TEXT")]
 		message: Option<String>,
 	},
-	/// Surgically edit a page (literal string replace)
+	/// Replace a line by number and hash (read them with cat --hashes)
 	Edit {
 		path: String,
-		/// Exact text to replace (must match exactly once unless --all)
-		#[arg(long, value_name = "TEXT")]
-		old: String,
-		/// Replacement text
+		/// 1-based line number to replace
+		#[arg(long, value_name = "N")]
+		line: usize,
+		/// Hash of the line as last read (refused if the line changed since)
+		#[arg(long, value_name = "HASH")]
+		hash: String,
+		/// Replacement text; may contain newlines to expand into several lines
 		#[arg(long, value_name = "TEXT")]
 		new: String,
-		/// Replace every occurrence instead of requiring a unique match
-		#[arg(long)]
-		all: bool,
 	},
 	/// Rename or move a page
 	Mv {
@@ -711,6 +714,16 @@ impl Backend {
 		}
 	}
 
+	fn cat_hashes(&self, path: &str, full: bool) -> Result<HashlinesResult, CliError> {
+		match self {
+			Self::Local(vault) => {
+				let limit = if full { None } else { Some(ReadLimit::default()) };
+				Ok(vault.cat_hashes(path, limit)?)
+			}
+			Self::Remote(remote) => remote.cat_hashes(path, full),
+		}
+	}
+
 	fn grep(&self, pattern: &str, opts: &GrepOptions) -> Result<GrepResult, CliError> {
 		match self {
 			Self::Local(vault) => Ok(vault.grep(pattern, opts)?),
@@ -732,10 +745,10 @@ impl Backend {
 		}
 	}
 
-	fn edit(&self, path: &str, old: &str, new: &str, all: bool) -> Result<EditResult, CliError> {
+	fn edit(&self, path: &str, edits: &[LineEdit]) -> Result<EditResult, CliError> {
 		match self {
-			Self::Local(vault) => Ok(vault.edit(path, old, new, all)?),
-			Self::Remote(remote) => remote.edit(path, old, new, all),
+			Self::Local(vault) => Ok(vault.edit(path, edits)?),
+			Self::Remote(remote) => remote.edit(path, edits),
 		}
 	}
 
@@ -790,7 +803,11 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 			let listing = backend.ls(path.as_deref(), depth)?;
 			Ok(Outcome::ok(emit(json, &listing, || render::listing(&listing, true))))
 		}
-		Command::Cat { path, full } => {
+		Command::Cat { path, full, hashes } => {
+			if hashes {
+				let result = backend.cat_hashes(&path, full)?;
+				return Ok(Outcome::ok(emit(json, &result, || render::hashlines(&result))));
+			}
 			let doc = backend.cat(&path, full)?;
 			Ok(Outcome::ok(emit(json, &doc, || render::document(&doc))))
 		}
@@ -827,8 +844,13 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 			let result = backend.write(&path, &content)?;
 			Ok(Outcome::ok(emit(json, &result, || render::write(&result))))
 		}
-		Command::Edit { path, old, new, all } => {
-			let result = backend.edit(&path, &old, &new, all)?;
+		Command::Edit { path, line, hash, new } => {
+			let edits = [LineEdit {
+				line,
+				expected_hash: hash,
+				new_text: new,
+			}];
+			let result = backend.edit(&path, &edits)?;
 			Ok(Outcome::ok(emit(json, &result, || render::edit(&result))))
 		}
 		Command::Mv { from, to, force } => {
