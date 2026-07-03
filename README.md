@@ -76,6 +76,19 @@ wikid edit decisions.md --old "status: draft" --new "status: final"
 - **Named bearer tokens** for auth. One TOML config: wikis, tokens, bind address.
 - **Dumb runtime.** No LLM inside. Thinking layers on top, through the same public surface.
 
+## Example wiki
+
+`examples/llm-wiki/` is a small public-safe demo vault inspired by
+[Andrej Karpathy's LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
+It shows a persistent LLM-maintained knowledge base with raw-source intake,
+compiled concept pages, workflows, an index, a log, and clean wikilinks:
+
+```sh
+wikid --dir examples/llm-wiki status
+wikid --dir examples/llm-wiki links index.md
+wikid --dir examples/llm-wiki doctor
+```
+
 Full spec: [docs/SPEC.md](docs/SPEC.md) · implementation blueprint: [docs/DESIGN.md](docs/DESIGN.md)
 
 ## Status
