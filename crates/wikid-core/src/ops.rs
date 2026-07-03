@@ -140,6 +140,8 @@ pub struct GrepResult {
 	pub matches: Vec<GrepMatch>,
 	/// All matches found, including those beyond `limit`.
 	pub total_matches: usize,
+	/// Files with at least one match.
+	pub matched_files: usize,
 	/// Text files searched (binary and non-UTF-8 files are skipped).
 	pub total_files: usize,
 	/// Whether `matches` was cut by `limit`.
@@ -207,6 +209,11 @@ impl Vault {
 				return Err(WikidError::NotFound { path: base.rel.clone() });
 			}
 			if base.abs.is_file() {
+				// Ignore rules apply to `ls` even for an explicitly named file:
+				// a gitignored/ignored file is as invisible as its directory.
+				if !self.visible_files()?.iter().any(|(rel, _)| *rel == base.rel) {
+					return Err(WikidError::NotFound { path: base.rel.clone() });
+				}
 				let entry = entry_for(&base.rel, &fs::metadata(&base.abs)?)?;
 				let (files, pages) = match entry.kind {
 					EntryKind::Page => (0, 1),
@@ -230,6 +237,9 @@ impl Vault {
 			let rel_path = dent.path().strip_prefix(self.root()).unwrap_or(dent.path());
 			if rel_path.as_os_str().is_empty() {
 				continue; // the vault root itself
+			}
+			if !self.contained(&dent) {
+				continue;
 			}
 			let rel = rel_path.to_string_lossy().into_owned();
 			let within = match base_rel {
@@ -325,6 +335,7 @@ impl Vault {
 		});
 		let mut matches = Vec::new();
 		let mut total_matches = 0usize;
+		let mut matched_files = 0usize;
 		let mut total_files = 0usize;
 		let mut truncated = false;
 		for (rel, abs) in files {
@@ -344,6 +355,7 @@ impl Vault {
 			if hit_lines.is_empty() {
 				continue;
 			}
+			matched_files += 1;
 			total_matches += hit_lines.len();
 			if opts.files_only {
 				if matches.len() < opts.limit {
@@ -371,6 +383,7 @@ impl Vault {
 		Ok(GrepResult {
 			matches,
 			total_matches,
+			matched_files,
 			total_files,
 			truncated,
 		})
@@ -533,9 +546,26 @@ impl Vault {
 			if dent.file_type().is_some_and(|t| t.is_dir()) {
 				continue;
 			}
+			if !self.contained(&dent) {
+				continue;
+			}
 			files.push((rel_path.to_string_lossy().into_owned(), dent.into_path()));
 		}
 		Ok(files)
+	}
+
+	/// True when a walked entry stays inside the vault. The walker never
+	/// follows links, but still yields symlink entries themselves — reading
+	/// through one pointing outside the vault would disclose out-of-vault
+	/// content (DESIGN §2: such symlinks are refused). Symlinks are
+	/// canonicalized and containment-checked; broken ones are dropped too.
+	fn contained(&self, dent: &ignore::DirEntry) -> bool {
+		if !dent.path_is_symlink() {
+			return true;
+		}
+		dent.path()
+			.canonicalize()
+			.is_ok_and(|canonical| canonical.starts_with(self.root()))
 	}
 }
 
@@ -559,13 +589,15 @@ pub(crate) fn is_page(rel: &str) -> bool {
 		.is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
 }
 
-/// Reads a file as text: `None` when unreadable, binary, or not UTF-8.
-pub(crate) fn read_text(abs: &Path) -> Option<String> {
-	let bytes = fs::read(abs).ok()?;
+/// Reads a file as text: `Ok(None)` when binary or not UTF-8 (a deliberate
+/// content-check skip), `Err` when the file cannot be read at all — callers
+/// must not silently drop unreadable files from their results.
+pub(crate) fn read_text(abs: &Path) -> Result<Option<String>, WikidError> {
+	let bytes = fs::read(abs)?;
 	if is_binary(&bytes) {
-		return None;
+		return Ok(None);
 	}
-	String::from_utf8(bytes).ok()
+	Ok(String::from_utf8(bytes).ok())
 }
 
 fn kind_of(is_dir: bool, rel: &str) -> EntryKind {
@@ -626,10 +658,19 @@ fn grep_match(rel: &str, lines: &[&str], index: usize, context: usize) -> GrepMa
 
 /// Atomic write: temp file in the target's parent directory, then rename.
 fn atomic_write(abs: &Path, content: &str) -> Result<(), WikidError> {
+	// Write through in-vault symlinks instead of replacing them with regular
+	// files: the rename target is the canonical destination. Containment was
+	// already verified by `resolve()`; a missing file canonicalizes to itself.
+	let abs = &abs.canonicalize().unwrap_or_else(|_| abs.to_path_buf());
 	let parent = abs.parent().expect("resolved path has a parent");
 	fs::create_dir_all(parent)?;
 	let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
 	tmp.write_all(content.as_bytes())?;
+	// `NamedTempFile` is created 0600; overwriting must keep the destination's
+	// existing permissions instead of silently resetting them.
+	if let Ok(meta) = fs::metadata(abs) {
+		fs::set_permissions(tmp.path(), meta.permissions())?;
+	}
 	tmp.persist(abs).map_err(|e| WikidError::Io(e.error))?;
 	Ok(())
 }
@@ -718,6 +759,11 @@ mod tests {
 		assert!(!paths(&listing.entries).iter().any(|p| p.starts_with("drafts")));
 		// Explicitly addressing an ignored directory behaves as not-found.
 		assert!(matches!(vault.ls(Some("drafts"), 1), Err(WikidError::NotFound { .. })));
+		// ...and so does explicitly addressing an ignored file.
+		assert!(matches!(
+			vault.ls(Some("drafts/wip.md"), 1),
+			Err(WikidError::NotFound { .. })
+		));
 	}
 
 	#[test]
@@ -877,6 +923,71 @@ mod tests {
 		));
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn walker_operations_skip_symlinks_out_of_the_vault() {
+		let outside = tempfile::tempdir().unwrap();
+		std::fs::write(outside.path().join("secret.md"), "top secret\n").unwrap();
+		let (dir, vault) = fixture();
+		std::os::unix::fs::symlink(outside.path().join("secret.md"), dir.path().join("escape.md")).unwrap();
+		std::os::unix::fs::symlink(dir.path().join("void.md"), dir.path().join("dangling.md")).unwrap();
+		// grep must not read through the link (content disclosure), and the
+		// link must not count as a searched file.
+		let result = vault.grep("top secret", &GrepOptions::default()).unwrap();
+		assert_eq!(result.total_matches, 0);
+		assert_eq!(result.total_files, 4);
+		// ls and glob must not list it (nor the broken link).
+		let listing = vault.ls(None, 1).unwrap();
+		assert!(
+			!paths(&listing.entries)
+				.iter()
+				.any(|p| p.contains("escape") || p.contains("dangling")),
+			"symlink leaked into ls: {:?}",
+			paths(&listing.entries)
+		);
+		assert_eq!(listing.total_pages, 4);
+		let globbed = vault.glob("*.md").unwrap();
+		assert_eq!(paths(&globbed.entries), vec!["index.md"]);
+		// In-vault symlinks stay visible.
+		std::os::unix::fs::symlink(dir.path().join("index.md"), dir.path().join("alias.md")).unwrap();
+		let globbed = vault.glob("*.md").unwrap();
+		assert_eq!(paths(&globbed.entries), vec!["alias.md", "index.md"]);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn write_preserves_existing_file_permissions() {
+		use std::os::unix::fs::PermissionsExt;
+		let (dir, vault) = fixture();
+		let path = dir.path().join("index.md");
+		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+		vault.write("index.md", "overwritten\n").unwrap();
+		let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode, 0o644, "write reset the file mode");
+		vault.edit("index.md", "overwritten", "edited", false).unwrap();
+		let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode, 0o644, "edit reset the file mode");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn write_through_an_in_vault_symlink_keeps_the_link() {
+		let (dir, vault) = fixture();
+		std::os::unix::fs::symlink(dir.path().join("index.md"), dir.path().join("alias.md")).unwrap();
+		vault.write("alias.md", "via alias\n").unwrap();
+		assert!(
+			std::fs::symlink_metadata(dir.path().join("alias.md"))
+				.unwrap()
+				.file_type()
+				.is_symlink(),
+			"write replaced the symlink with a regular file"
+		);
+		assert_eq!(
+			std::fs::read_to_string(dir.path().join("index.md")).unwrap(),
+			"via alias\n"
+		);
+	}
+
 	// --- grep ---
 
 	#[test]
@@ -887,6 +998,8 @@ mod tests {
 		assert_eq!(result.matches[0].path, "projects/alpha.md");
 		assert_eq!(result.matches[0].line, 7);
 		assert_eq!(result.total_matches, 3);
+		// Matches live in alpha.md and index.md only.
+		assert_eq!(result.matched_files, 2);
 		// index.md, alpha.md, beta.md, unicode.md are searched; binaries are not.
 		assert_eq!(result.total_files, 4);
 		assert!(!result.truncated);

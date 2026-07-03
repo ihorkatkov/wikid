@@ -120,9 +120,12 @@ pub fn grep(result: &GrepResult, pattern: &str, files_only: bool) -> String {
 			}
 		}
 	}
+	// matched_files counts files with hits; total_files counts files searched.
+	let match_word = if result.total_matches == 1 { "match" } else { "matches" };
+	let file_word = if result.matched_files == 1 { "file" } else { "files" };
 	let totals = format!(
-		"total: {} matches in {} files",
-		result.total_matches, result.total_files
+		"total: {} {match_word} in {} {file_word} ({} searched)",
+		result.total_matches, result.matched_files, result.total_files
 	);
 	if result.truncated {
 		lines.push(format!(
@@ -282,11 +285,41 @@ mod tests {
 		let result = GrepResult {
 			matches: vec![],
 			total_matches: 0,
+			matched_files: 0,
 			total_files: 7,
 			truncated: false,
 		};
 		let out = grep(&result, "needle", false);
 		assert!(out.starts_with("no matches for \"needle\" in 7 files"), "{out}");
+	}
+
+	#[test]
+	fn grep_totals_separate_matched_from_searched_and_pluralize() {
+		let hit = wikid_core::GrepMatch {
+			path: "a.md".to_string(),
+			line: 1,
+			text: "x".to_string(),
+			context_before: None,
+			context_after: None,
+		};
+		let result = GrepResult {
+			matches: vec![hit.clone()],
+			total_matches: 1,
+			matched_files: 1,
+			total_files: 17,
+			truncated: false,
+		};
+		let out = grep(&result, "x", false);
+		assert!(out.contains("total: 1 match in 1 file (17 searched)"), "{out}");
+		let result = GrepResult {
+			matches: vec![hit.clone(), hit],
+			total_matches: 2,
+			matched_files: 2,
+			total_files: 17,
+			truncated: false,
+		};
+		let out = grep(&result, "x", false);
+		assert!(out.contains("total: 2 matches in 2 files (17 searched)"), "{out}");
 	}
 
 	#[test]
@@ -300,12 +333,13 @@ mod tests {
 				context_after: None,
 			}],
 			total_matches: 9,
+			matched_files: 2,
 			total_files: 3,
 			truncated: true,
 		};
 		let out = grep(&result, "x", false);
 		assert!(
-			out.contains("total: 9 matches in 3 files (showing first 1) — use --limit <n>"),
+			out.contains("total: 9 matches in 2 files (3 searched) (showing first 1) — use --limit <n>"),
 			"{out}"
 		);
 	}

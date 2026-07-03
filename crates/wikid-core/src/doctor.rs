@@ -215,7 +215,10 @@ impl Vault {
 			if !is_page(rel) {
 				continue;
 			}
-			let Some(text) = read_text(abs) else { continue };
+			// IO failures must surface (a silently dropped page would skew
+			// every check and the page count); binary/non-UTF-8 pages are
+			// deliberately skipped.
+			let Some(text) = read_text(abs)? else { continue };
 			let meta = std::fs::metadata(abs)?;
 			pages.push(PageScan {
 				rel: rel.clone(),
@@ -404,7 +407,7 @@ fn stale_pages(pages: &[PageScan], stale_days: u64) -> Vec<Issue> {
 		.iter()
 		.filter_map(|page| {
 			let age = now.duration_since(page.modified).ok()?;
-			if age < Duration::from_secs(stale_days * SECS_PER_DAY) {
+			if age < Duration::from_secs(stale_days.saturating_mul(SECS_PER_DAY)) {
 				return None;
 			}
 			let days = age.as_secs() / SECS_PER_DAY;
@@ -631,6 +634,19 @@ mod tests {
 	}
 
 	#[test]
+	fn huge_stale_days_saturates_instead_of_overflowing() {
+		// u64::MAX days * 86400 would overflow; the threshold must saturate.
+		let (_dir, vault) = test_fixtures::knowledge_vault();
+		let report = vault
+			.doctor(&DoctorOptions {
+				stale_days: u64::MAX,
+				checks: Some(vec![Check::StalePages]),
+			})
+			.unwrap();
+		assert_eq!(report.counts["stale_pages"], 0);
+	}
+
+	#[test]
 	fn oversized_pages_fire_on_line_count_and_byte_size() {
 		let (_dir, vault) = test_fixtures::knowledge_vault();
 		let report = vault.doctor(&DoctorOptions::default()).unwrap();
@@ -671,6 +687,34 @@ mod tests {
 		let report = vault.doctor(&DoctorOptions::default()).unwrap();
 		assert_eq!(report.counts["broken_links"], 1);
 		assert!(report.issues.iter().all(|i| !i.path.contains("logo.png")));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn doctor_surfaces_unreadable_pages_as_io_errors() {
+		use std::os::unix::fs::PermissionsExt;
+		let (dir, vault) = test_fixtures::vault();
+		let page = dir.path().join("projects/alpha.md");
+		std::fs::set_permissions(&page, std::fs::Permissions::from_mode(0o000)).unwrap();
+		let err = vault.doctor(&DoctorOptions::default()).unwrap_err();
+		assert!(matches!(err, WikidError::Io(_)), "got {err:?}");
+		std::fs::set_permissions(&page, std::fs::Permissions::from_mode(0o644)).unwrap();
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn doctor_ignores_symlinks_out_of_the_vault() {
+		let outside = tempfile::tempdir().unwrap();
+		std::fs::write(outside.path().join("secret.md"), "[[no-such-page]]\n").unwrap();
+		let (dir, vault) = test_fixtures::vault();
+		std::os::unix::fs::symlink(outside.path().join("secret.md"), dir.path().join("escape.md")).unwrap();
+		let report = vault.doctor(&DoctorOptions::default()).unwrap();
+		assert_eq!(report.counts["broken_links"], 0);
+		assert!(
+			report.issues.iter().all(|i| i.path != "escape.md"),
+			"{:?}",
+			report.issues
+		);
 	}
 
 	#[test]

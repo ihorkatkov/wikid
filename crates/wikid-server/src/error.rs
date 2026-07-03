@@ -67,6 +67,18 @@ impl ApiError {
 		}
 	}
 
+	/// `DELETE` without `force=true` (DESIGN §7): the same structured error
+	/// the CLI shows for `rm` without `--force` — same `force_required` code
+	/// and shape, with the wording adapted to the wire (`force=true`).
+	pub(crate) fn force_required(path: &str) -> Self {
+		Self {
+			status: StatusCode::BAD_REQUEST,
+			code: "force_required",
+			message: format!("rm is destructive: refusing to delete {path} without force=true"),
+			hint: Some("re-send with force=true to delete it permanently (there is no undo)".to_owned()),
+		}
+	}
+
 	pub(crate) fn route_not_found() -> Self {
 		Self {
 			status: StatusCode::NOT_FOUND,

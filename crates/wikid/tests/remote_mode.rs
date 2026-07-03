@@ -193,6 +193,35 @@ fn remote_mode_matches_local_mode_end_to_end() {
 	assert_eq!(code, 0);
 	assert_eq!(remote_edit, local_edit, "edit parity");
 
+	// mv: a remote move renders exactly like the same local move. Restore the
+	// file between invocations so both runs move the same source to the same
+	// destination (byte-identical output requires identical from/to).
+	let (remote_mv, code) = remote(base, &["mv", "notes/alpha.md", "notes/alpha2.md"]);
+	assert_eq!(code, 0);
+	assert!(vault.path().join("notes/alpha2.md").exists(), "remote mv moved on disk");
+	assert!(!vault.path().join("notes/alpha.md").exists());
+	local(vault.path(), &["mv", "notes/alpha2.md", "notes/alpha.md"]);
+	let (local_mv, code) = local(vault.path(), &["mv", "notes/alpha.md", "notes/alpha2.md"]);
+	assert_eq!(code, 0);
+	assert_eq!(remote_mv, local_mv, "mv parity");
+	local(vault.path(), &["mv", "notes/alpha2.md", "notes/alpha.md"]);
+	let (remote_mv_json, code) = remote(base, &["mv", "notes/alpha.md", "notes/alpha2.md", "--json"]);
+	assert_eq!(code, 0);
+	local(vault.path(), &["mv", "notes/alpha2.md", "notes/alpha.md"]);
+	let (local_mv_json, code) = local(vault.path(), &["mv", "notes/alpha.md", "notes/alpha2.md", "--json"]);
+	assert_eq!(code, 0);
+	assert_eq!(remote_mv_json, local_mv_json, "mv --json parity");
+	local(vault.path(), &["mv", "notes/alpha2.md", "notes/alpha.md"]);
+
+	// mv onto an existing destination without --force: refused identically
+	// (already_exists over the wire), and nothing moves.
+	let (remote_clobber, remote_code) = remote(base, &["mv", "notes/alpha.md", "index.md"]);
+	let (local_clobber, local_code) = local(vault.path(), &["mv", "notes/alpha.md", "index.md"]);
+	assert_eq!(remote_code, 1);
+	assert!(remote_clobber.starts_with("error[already_exists]:"), "{remote_clobber}");
+	assert_eq!((remote_clobber, remote_code), (local_clobber, local_code));
+	assert!(vault.path().join("notes/alpha.md").exists(), "refused mv must not move");
+
 	// rm: the --force refusal is identical (gated client-side in both modes),
 	// and the deletion renders identically.
 	let (remote_refusal, remote_code) = remote(base, &["rm", "notes/beta.md"]);
@@ -221,6 +250,28 @@ fn remote_mode_matches_local_mode_end_to_end() {
 		&["edit", "notes/alpha.md", "--old", "needle", "--new", "pin"],
 	);
 	assert_eq!(remote_err, local_err, "ambiguous-edit error parity");
+}
+
+/// Remote targeting purely via `WIKID_SERVER`/`WIKID_TOKEN`/`WIKID_WIKI` env
+/// vars — no flags — reaches the daemon and renders exactly like local mode.
+#[test]
+fn env_vars_alone_target_the_remote_daemon() {
+	let vault = fixture_vault();
+	let server = spawn_server(vault.path());
+
+	let mut cmd = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut cmd);
+	let output = cmd
+		.env("WIKID_SERVER", &server.base)
+		.env("WIKID_TOKEN", TOKEN)
+		.env("WIKID_WIKI", WIKI)
+		.arg("status")
+		.output()
+		.unwrap();
+	assert_eq!(output.status.code(), Some(0), "env-var targeting must reach the daemon");
+	let remote_out = String::from_utf8(output.stdout).unwrap();
+	let (local_out, _) = local(vault.path(), &["status"]);
+	assert_eq!(remote_out, local_out, "env-var remote status matches local");
 }
 
 #[test]

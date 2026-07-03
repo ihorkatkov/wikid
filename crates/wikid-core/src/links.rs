@@ -101,7 +101,9 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 	}
 	for caps in markdown_re().captures_iter(content) {
 		let whole = caps.get(0).expect("capture 0");
-		let inner = caps[1].trim();
+		// CommonMark allows a quoted title after the destination:
+		// `[text](dest "title")` — the title is not part of the target.
+		let inner = strip_markdown_title(caps[1].trim());
 		let inner = inner
 			.strip_prefix('<')
 			.and_then(|s| s.strip_suffix('>'))
@@ -117,13 +119,64 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 			whole.start(),
 			ExtractedLink {
 				raw: whole.as_str().to_string(),
-				target: target.to_string(),
+				// Markdown destinations are URLs: `My%20Note.md` on disk is
+				// `My Note.md`. Wikilink targets stay literal.
+				target: percent_decode(target),
 				kind: LinkKind::Markdown,
 			},
 		));
 	}
 	found.sort_by_key(|(start, _)| *start);
 	found.into_iter().map(|(_, link)| link).collect()
+}
+
+/// Strips a trailing CommonMark link title — `"…"` or `'…'` preceded by
+/// whitespace after the destination, e.g. `notes/guide.md "The Guide"` →
+/// `notes/guide.md`. A quoted string with nothing before it is a destination,
+/// not a title, and is left alone.
+fn strip_markdown_title(inner: &str) -> &str {
+	for quote in ['"', '\''] {
+		let Some(without_close) = inner.strip_suffix(quote) else {
+			continue;
+		};
+		let Some(open) = without_close.rfind(quote) else {
+			continue;
+		};
+		let before = &without_close[..open];
+		if before.ends_with(char::is_whitespace) && !before.trim_end().is_empty() {
+			return before.trim_end();
+		}
+	}
+	inner
+}
+
+/// Decodes RFC 3986 percent-escapes (`%20` → space) in a markdown link
+/// destination. Malformed escapes pass through literally; a decode that is
+/// not valid UTF-8 leaves the target unchanged.
+fn percent_decode(target: &str) -> String {
+	let bytes = target.as_bytes();
+	let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+	let mut i = 0;
+	while i < bytes.len() {
+		let escape = (bytes[i] == b'%' && i + 2 < bytes.len())
+			.then(|| Some((hex_val(bytes[i + 1])?, hex_val(bytes[i + 2])?)))
+			.flatten();
+		match escape {
+			Some((hi, lo)) => {
+				out.push(hi * 16 + lo);
+				i += 3;
+			}
+			None => {
+				out.push(bytes[i]);
+				i += 1;
+			}
+		}
+	}
+	String::from_utf8(out).unwrap_or_else(|_| target.to_string())
+}
+
+fn hex_val(byte: u8) -> Option<u8> {
+	(byte as char).to_digit(16).map(|v| v as u8)
 }
 
 /// The resolution index: every visible file in the vault, addressable by
@@ -224,7 +277,10 @@ impl Vault {
 			if !is_page(rel) {
 				continue;
 			}
-			let Some(text) = read_text(abs) else { continue };
+			// IO failures must surface (a silently missing page would mean
+			// silently wrong outgoing links or backlinks); binary/non-UTF-8
+			// pages are deliberately skipped.
+			let Some(text) = read_text(abs)? else { continue };
 			let extracted = extract_links(&text);
 			if *rel == target.rel {
 				outgoing = extracted
@@ -315,6 +371,55 @@ mod tests {
 	fn markdown_fragment_is_stripped_for_resolution() {
 		let links = extract_links("[s](notes/guide.md#setup)\n");
 		assert_eq!(links[0].target, "notes/guide.md");
+	}
+
+	#[test]
+	fn markdown_titles_are_stripped_for_resolution() {
+		let links = extract_links(
+			"[a](notes/guide.md \"The Guide\") [b](notes/guide.md 'Single') \
+			 [c](notes/guide.md#setup \"Titled\") [d](<my file.md> \"T\") [e](\"quoted name.md\")\n",
+		);
+		let targets: Vec<&str> = links.iter().map(|l| l.target.as_str()).collect();
+		assert_eq!(
+			targets,
+			vec![
+				"notes/guide.md",
+				"notes/guide.md",
+				"notes/guide.md",
+				"my file.md",
+				// A bare quoted string is a destination, not a title.
+				"\"quoted name.md\"",
+			]
+		);
+		// The raw text keeps the title as written.
+		assert_eq!(links[0].raw, "[a](notes/guide.md \"The Guide\")");
+	}
+
+	#[test]
+	fn markdown_targets_are_percent_decoded_but_wikilinks_stay_literal() {
+		let links = extract_links("[n](My%20Note.md) [bad](odd%2Zname.md) [pct](50%25.md) [[My%20Note]]\n");
+		let targets: Vec<(&str, LinkKind)> = links.iter().map(|l| (l.target.as_str(), l.kind)).collect();
+		assert_eq!(
+			targets,
+			vec![
+				("My Note.md", LinkKind::Markdown),
+				// Malformed escapes pass through literally.
+				("odd%2Zname.md", LinkKind::Markdown),
+				("50%.md", LinkKind::Markdown),
+				("My%20Note", LinkKind::Wikilink),
+			]
+		);
+	}
+
+	#[test]
+	fn percent_encoded_markdown_link_resolves_to_the_file_on_disk() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault.write("My Note.md", "# My Note\n").unwrap();
+		vault.write("linker.md", "[n](My%20Note.md)\n").unwrap();
+		let report = vault.links("linker.md").unwrap();
+		assert_eq!(report.outgoing[0].resolved.as_deref(), Some("My Note.md"));
+		let back = vault.links("My Note.md").unwrap();
+		assert_eq!(back.backlinks, vec!["linker.md"]);
 	}
 
 	// --- resolution order ---
@@ -457,6 +562,33 @@ mod tests {
 			Err(WikidError::InvalidPath { .. })
 		));
 		assert!(matches!(vault.links("projects"), Err(WikidError::InvalidPath { .. })));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn links_surfaces_unreadable_pages_as_io_errors() {
+		use std::os::unix::fs::PermissionsExt;
+		let (dir, vault) = test_fixtures::vault();
+		std::fs::set_permissions(dir.path().join("index.md"), std::fs::Permissions::from_mode(0o000)).unwrap();
+		let err = vault.links("index.md").unwrap_err();
+		assert!(matches!(err, WikidError::Io(_)), "got {err:?}");
+		// Restore so TempDir cleanup and other assertions behave.
+		std::fs::set_permissions(dir.path().join("index.md"), std::fs::Permissions::from_mode(0o644)).unwrap();
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn links_ignores_symlinks_out_of_the_vault() {
+		let outside = tempfile::tempdir().unwrap();
+		std::fs::write(outside.path().join("secret.md"), "links to [[index]]\n").unwrap();
+		let (dir, vault) = test_fixtures::vault();
+		std::os::unix::fs::symlink(outside.path().join("secret.md"), dir.path().join("escape.md")).unwrap();
+		let report = vault.links("index.md").unwrap();
+		assert!(
+			!report.backlinks.contains(&"escape.md".to_string()),
+			"out-of-vault symlink leaked into backlinks: {:?}",
+			report.backlinks
+		);
 	}
 
 	#[test]

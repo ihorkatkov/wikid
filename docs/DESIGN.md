@@ -14,7 +14,8 @@ Companion to [SPEC.md](SPEC.md). SPEC says *what*; this locks *how*. Implementat
 - Rejected with `InvalidPath`: absolute paths, `..` components (checked after lexical normalization), empty paths, paths whose normalized form escapes the root.
 - Vault root is canonicalized at `Vault::open`. Operation targets are lexically joined; when the target exists, a defensive `canonicalize().starts_with(root)` check also applies (symlinks pointing outside the vault are refused).
 - **Ignore rules** (all read operations: ls/tree/grep/glob/links/doctor/status): skip hidden files and dot-directories at any depth (`.obsidian/`, `.git/`, `.trash/`, …) via the `ignore` crate (`WalkBuilder`, hidden-filter on, gitignore respected). `cat`/`write`/`edit`/`mv`/`rm` accept explicit non-hidden paths only (same `InvalidPath` for dotted components).
-- A **page** is a `.md` file. Other files (attachments) appear in `ls`/`glob`, can be `cat`ed if valid UTF-8, and are skipped by `grep`/`links`/`doctor` content checks (binary sniff: NUL byte in first 8 KiB).
+- A **page** is a `.md` file. Other files (attachments) appear in `ls`/`glob` and can be `cat`ed if valid UTF-8. `grep` searches pages plus UTF-8 text attachments; binary files (sniff: NUL byte in first 8 KiB) are skipped by `grep` and by `links`/`doctor` content checks (which only scan pages).
+- Symlinked entries encountered by the walker that resolve outside the vault root (or dangle) are skipped by all read operations — the walker never follows or lists content beyond the root. In-vault symlinks are listed normally.
 
 ## 3. Core: operations
 
@@ -24,7 +25,7 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 |---|---|
 | `ls(path: Option<&str>, depth: usize)` | Listing of dirs (trailing `/`) + files at `path` (default root), recursing to `depth` (default 1; `tree` = depth 3). Entries: `path`, `kind` (`dir`/`file`/`page`), `size`, `modified` (RFC3339 UTC). Includes `total_dirs`, `total_files`, `total_pages` for the whole subtree regardless of depth (AXI: pre-computed aggregates). |
 | `cat(path, limit: Option<ReadLimit>)` | Returns `Document { path, content, truncated, total_lines, total_bytes, modified }`. Default limit 400 lines or 32 KiB (whichever first); `None` = full. |
-| `grep(pattern, opts)` | Regex search (`regex` crate) over pages + UTF-8 text files. Options: `ignore_case`, `files_only`, `context` (lines), `limit` (default 50 matches). Result: `matches: [{path, line, text}]` (+ `context_before/after` when requested), `total_matches`, `total_files`, `truncated`. Files whose path stem matches the pattern are ranked first. |
+| `grep(pattern, opts)` | Regex search (`regex` crate) over pages + UTF-8 text files. Options: `ignore_case`, `files_only`, `context` (lines), `limit` (default 50 matches). Result: `matches: [{path, line, text}]` (+ `context_before/after` when requested), `total_matches`, `matched_files` (files with ≥1 match), `total_files` (files searched), `truncated`. Files whose path stem matches the pattern are ranked first. |
 | `glob(pattern)` | `globset` match over relative paths, e.g. `**/*.md`. Sorted by path. Returns entries + `total`. |
 | `write(path, content)` | Create or overwrite. Creates parent dirs. **Atomic**: `tempfile::NamedTempFile::new_in(parent)` + `persist`. Returns `{path, created: bool, bytes}`. |
 | `edit(path, old, new, all: bool)` | Literal (non-regex) string replacement. `all=false`: `old` must match exactly once — 0 matches → `NoMatch` (error includes a best-effort nearest-line hint), >1 → `Ambiguous { count }`. `all=true`: replace every occurrence, return count. Write is atomic as above. |
@@ -104,7 +105,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
   - `PUT  /v1/wikis/{wiki}/pages` body `{path, content}`
   - `POST /v1/wikis/{wiki}/edit` body `{path, old, new, all}`
   - `POST /v1/wikis/{wiki}/mv` body `{from, to, force}`
-  - `DELETE /v1/wikis/{wiki}/pages?path=&force=true` (`force` missing → 400 with the same structured error the CLI shows)
+  - `DELETE /v1/wikis/{wiki}/pages?path=&force=true` (`force` missing → 400 `force_required`, the same code and shape as the CLI's `rm` refusal with wording adapted to the wire: `force=true` instead of `--force`)
 - Success bodies are the core structs serialized directly. `WikidError` → status mapping: `NotFound`/`unknown_wiki` 404, `InvalidPath`/`BadPattern`/usage 400, `AlreadyExists`/`Ambiguous` 409, `NoMatch` 404, `NotUtf8` 415, `Io` 500. Body always `{"error":{"code","message","hint"}}`.
 - Config (TOML, see `wikid-server::config`): `bind` (default `127.0.0.1:7448`), `[wikis] name = "/path"`, `[tokens] "token" = "actor-name"`. Actor names are logged (`tracing`) but not otherwise used in MVP — attribution is deferred by SPEC.
 - Startup validates every wiki dir exists (fail fast) and warns loudly when `tokens` is empty and bind is non-loopback (auth-less non-local serving is refused).

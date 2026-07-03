@@ -164,19 +164,39 @@ fn axi_6_rm_requires_force_and_never_prompts() {
 #[test]
 fn axi_7_human_output_ends_with_hints_json_has_none() {
 	let vault = fixture_vault();
-	let human = stdout_of(wikid(vault.path()).arg("status"));
-	let hint_lines: Vec<&str> = human.lines().filter(|l| l.starts_with("hint:")).collect();
+	// Every read command's human output must trail with hint: lines, and its
+	// --json output must carry none.
+	let commands: &[&[&str]] = &[
+		&["status"],
+		&["ls"],
+		&["tree"],
+		&["cat", "index.md"],
+		&["grep", "needle"],
+		&["glob", "**/*.md"],
+		&["links", "index.md"],
+		&["doctor"],
+	];
+	for args in commands {
+		let human = stdout_of(wikid(vault.path()).args(*args));
+		let hint_lines: Vec<&str> = human.lines().filter(|l| l.starts_with("hint:")).collect();
+		assert!(
+			(1..=2).contains(&hint_lines.len()),
+			"{args:?}: expected 1-2 hint lines, got {}: {human}",
+			hint_lines.len()
+		);
+		assert!(
+			human.trim_end().lines().last().unwrap().starts_with("hint:"),
+			"{args:?}: hints must trail the output: {human}"
+		);
+		let json = stdout_of(wikid(vault.path()).args(*args).arg("--json"));
+		assert!(!json.contains("hint"), "{args:?}: --json must not carry hints: {json}");
+	}
+	// Hints name a concrete next command (AXI-7), e.g. grep points at cat.
+	let grep = stdout_of(wikid(vault.path()).args(["grep", "needle"]));
 	assert!(
-		(1..=2).contains(&hint_lines.len()),
-		"expected 1-2 hint lines, got {}: {human}",
-		hint_lines.len()
+		grep.contains("hint: wikid cat"),
+		"grep hint names the next step: {grep}"
 	);
-	assert!(
-		human.trim_end().lines().last().unwrap().starts_with("hint:"),
-		"hints must trail the output: {human}"
-	);
-	let json = stdout_of(wikid(vault.path()).args(["status", "--json"]));
-	assert!(!json.contains("hint"), "--json must not carry hints: {json}");
 }
 
 // --- `--json` emits the serialized core struct for every command ---
@@ -199,6 +219,8 @@ fn json_output_parses_for_every_command() {
 	assert!(cat["content"].as_str().unwrap().contains("[[alpha]]"));
 	let grep = json_of(wikid(vault.path()).args(["grep", "needle", "--json"]));
 	assert_eq!(grep["total_matches"], 2);
+	assert_eq!(grep["matched_files"], 1, "both needles live in notes/alpha.md");
+	assert_eq!(grep["total_files"], 4);
 	let glob = json_of(wikid(vault.path()).args(["glob", "**/*.md", "--json"]));
 	assert_eq!(glob["total"], 4);
 	let write = json_of(wikid(vault.path()).args(["write", "new.md", "-m", "fresh", "--json"]));
@@ -394,7 +416,7 @@ fn grep_supports_ignore_case_files_only_context_and_limit() {
 		.assert()
 		.success()
 		.stdout(predicate::str::contains(
-			"total: 2 matches in 4 files (showing first 1) — use --limit <n>",
+			"total: 2 matches in 1 file (4 searched) (showing first 1) — use --limit <n>",
 		));
 }
 
@@ -578,6 +600,21 @@ fn rm_of_missing_file_is_not_found() {
 		.assert()
 		.code(1)
 		.stdout(predicate::str::starts_with("error[not_found]:"));
+}
+
+/// `--dir` at a nonexistent path is a dedicated structured error that points
+/// back at the targeting flags, not the generic "run ls" not-found hint.
+#[test]
+fn dir_at_missing_path_is_a_targeting_error() {
+	wikid(Path::new("/nonexistent/wikid-test-vault"))
+		.arg("status")
+		.assert()
+		.code(1)
+		.stdout(predicate::str::starts_with(
+			"error[not_found]: wiki directory not found: /nonexistent/wikid-test-vault",
+		))
+		.stdout(predicate::str::contains("--dir"))
+		.stderr(predicate::str::is_empty());
 }
 
 /// `--dir` accepts relative paths too (resolved from the process cwd).

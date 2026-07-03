@@ -116,7 +116,22 @@ fn authenticate(state: &AppState, request: &Request) -> Option<String> {
 	}
 	let value = request.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
 	let token = value.strip_prefix("Bearer ")?;
-	state.tokens.get(token).cloned()
+	// Compare against every configured token without early exit so timing
+	// does not leak how much of a guessed token matched.
+	let mut actor = None;
+	for (candidate, name) in &state.tokens {
+		if constant_time_eq(candidate.as_bytes(), token.as_bytes()) {
+			actor = Some(name.clone());
+		}
+	}
+	actor
+}
+
+/// Constant-time byte comparison: XOR-folds the full length instead of
+/// returning at the first mismatch. Length differences still short-circuit —
+/// standard for bearer tokens, where length is not the secret.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+	a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// One wiki in the daemon's `GET /v1/wikis` listing.
@@ -336,10 +351,7 @@ async fn rm_page(
 	let vault = state.wiki(&wiki)?;
 	// The confirmation gate lives here, not in core (DESIGN §3 rm).
 	if q.force != Some(true) {
-		return Err(ApiError::usage(
-			format!("refusing to delete {} without force", q.path),
-			Some("deletion is permanent (no undo in the runtime); pass force=true to confirm".to_owned()),
-		));
+		return Err(ApiError::force_required(&q.path));
 	}
 	Ok(Json(vault.rm(&q.path)?))
 }
@@ -684,6 +696,15 @@ mod tests {
 		assert!(!dir.path().join("projects/alpha.md").exists());
 	}
 
+	#[test]
+	fn constant_time_eq_matches_equality() {
+		assert!(constant_time_eq(b"wkd_token", b"wkd_token"));
+		assert!(!constant_time_eq(b"wkd_token", b"wkd_tokeN"));
+		assert!(!constant_time_eq(b"wkd_token", b"wkd_toke"));
+		assert!(!constant_time_eq(b"", b"x"));
+		assert!(constant_time_eq(b"", b""));
+	}
+
 	// --- refusals and error mapping through the wire ---
 
 	#[tokio::test]
@@ -702,7 +723,12 @@ mod tests {
 				.unwrap();
 			let (status, body) = call(&app, request).await;
 			assert_eq!(status, StatusCode::BAD_REQUEST, "deleted via {uri}");
-			assert_eq!(error_code(&body), "usage");
+			// The CLI's rm refusal, with wire wording (DESIGN §7).
+			assert_eq!(error_code(&body), "force_required");
+			assert_eq!(
+				body["error"]["message"].as_str().unwrap(),
+				"rm is destructive: refusing to delete index.md without force=true"
+			);
 			assert!(body["error"]["hint"].as_str().unwrap().contains("force=true"));
 		}
 		assert!(dir.path().join("index.md").exists());

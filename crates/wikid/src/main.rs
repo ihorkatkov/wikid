@@ -199,7 +199,17 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 			.ok_or_else(CliError::no_wiki)?;
 		Backend::Remote(Remote::new(&server, token, wiki))
 	} else if let Some(dir) = dir {
-		Backend::Local(Vault::open(dir)?)
+		// A missing vault directory deserves better than the generic
+		// not-found hint ("run ls…" — there is nothing to ls yet).
+		let vault = Vault::open(&dir).map_err(|err| match err {
+			wikid_core::WikidError::NotFound { path } => CliError::new(
+				"not_found",
+				format!("wiki directory not found: {path}"),
+				Some("pass an existing directory via --dir or $WIKID_DIR".to_owned()),
+			),
+			other => CliError::from(other),
+		})?;
+		Backend::Local(vault)
 	} else {
 		return Err(CliError::no_target());
 	};
