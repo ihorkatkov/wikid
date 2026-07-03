@@ -24,7 +24,7 @@ Agents accumulate knowledge — architecture notes, decisions, debugging finding
 curl -fsSL https://raw.githubusercontent.com/ihorkatkov/wikid/main/install.sh | bash
 ```
 
-Prebuilt binaries for macOS and Linux are on the [releases page](https://github.com/ihorkatkov/wikid/releases). The installer bootstraps Rust with rustup if `cargo` is not already available; from a checkout, `./install.sh` works too.
+The installer builds from source with `cargo install`, bootstrapping Rust with rustup if `cargo` is not already available; from a checkout, `./install.sh` works too. Prebuilt binaries for macOS and Linux are available for manual download on the [releases page](https://github.com/ihorkatkov/wikid/releases).
 
 ### 1. Make (or reuse) a wiki
 

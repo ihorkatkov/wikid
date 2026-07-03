@@ -1,51 +1,56 @@
-# Agent Instructions
+# AGENTS.md
 
-This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
+wikid: a single Rust binary that exposes plain-Markdown wiki directories to remote agents over CLI and MCP. Read `docs/SPEC.md` (v0.2) before making design decisions — it records what was deliberately cut from v0.1 and why. Do not reintroduce cut features (git integration, databases, proposals/review, sessions, attribution) without an explicit product decision.
 
-> **Architecture in one line:** Issues live in a local Dolt database
-> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
-> git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
-> `.beads/issues.jsonl` is a passive export, not the wire protocol.
->
-> See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md)
-> for the one-screen overview and anti-patterns (don't treat JSONL as the
-> source of truth; don't `bd import` during normal operation; don't
-> reach for third-party Dolt hosting before trying the default).
+## Core invariants
 
-## Quick Reference
+- A wiki is any directory of Markdown files. An existing Obsidian vault must work with zero setup or migration.
+- The runtime holds no state that isn't derivable from the files. Indexes are rebuildable caches.
+- Writes are atomic (temp file + rename), last-write-wins. No locks, no versions, no git, no DB.
+- Every operation is available identically via CLI, HTTP, and MCP — thin views over one operation core in `wikid-core`.
+- CLI output follows the AXI principles (https://axi.md/): content-first no-arg default, token-efficient output, 3–4 fields per list item, truncation with size hints, structured errors on stdout, exit codes 0/1/2, never prompt interactively, contextual next-step hints.
+
+## Workspace
+
+- `crates/wikid-core` — vault model, wikilink graph, file ops, health checks. No I/O framework deps.
+- `crates/wikid-server` — axum HTTP daemon, bearer-token auth, MCP (later).
+- `crates/wikid` — the `wikid` binary: clap CLI, client for remote daemons, local mode, `serve`.
+
+## Commands
+
+- Build: `cargo build`
+- Test: `cargo test`
+- Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- Format: `cargo fmt --all`
+- Docs check: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`
+
+## Git hooks
+
+Hooks live in `.hooks/` (pre-commit runs fmt/clippy/build/test/doc with warnings as errors; commit-msg enforces conventional commits). `bd init` copies them into `.beads/hooks/` with beads integration appended and points `core.hooksPath` there — on a fresh clone run `bd init` (or `git config core.hooksPath .hooks` if not using beads). If you edit `.hooks/`, re-apply the change to the `.beads/hooks/` copy. Never bypass with `--no-verify`.
+
+## Design authority
+
+`docs/DESIGN.md` is the implementation blueprint (API shapes, error codes, CLI flags, HTTP routes, locked dependencies). Code deviating from it must update it in the same change. Do not add dependencies beyond its §9 list.
+
+## Conventions
+
+- Tests co-located in `#[cfg(test)]` modules.
+- Hard tabs for indentation (rustfmt default here is spaces — this repo uses `rustfmt.toml` with `hard_tabs = true`).
+- Conventional commits: `feat:`, `fix:`, `chore:`, `refactor:`, `test:`, `docs:`.
+
+## Non-interactive shell commands
+
+**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts. `cp`, `mv`, and `rm` may be aliased to `-i` (interactive) on some systems.
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
-```
-
-## Non-Interactive Shell Commands
-
-**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
-
-Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
-
-**Use these forms instead:**
-```bash
-# Force overwrite without prompting
 cp -f source dest           # NOT: cp source dest
 mv -f source dest           # NOT: mv source dest
 rm -f file                  # NOT: rm file
-
-# For recursive operations
 rm -rf directory            # NOT: rm -r directory
 cp -rf source dest          # NOT: cp -r source dest
 ```
 
-**Other commands that may prompt:**
-- `scp` - use `-o BatchMode=yes` for non-interactive
-- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
-- `apt-get` - use `-y` flag
-- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
+Other commands that may prompt: `scp`/`ssh` — use `-o BatchMode=yes`; `apt-get` — use `-y`; `brew` — set `HOMEBREW_NO_AUTO_UPDATE=1`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
