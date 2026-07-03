@@ -4,7 +4,9 @@
 //! binary against temp vaults.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -57,6 +59,22 @@ fn clear_env(cmd: &mut Command) {
 fn stdout_of(cmd: &mut Command) -> String {
 	let output = cmd.output().expect("run wikid");
 	String::from_utf8(output.stdout).expect("stdout is UTF-8")
+}
+
+fn write_config(path: &Path, bind: &str, wikis: &[(&str, &Path)], default_wiki: Option<&str>, token: Option<&str>) {
+	let mut text = format!("bind = {bind:?}\n");
+	if let Some(default_wiki) = default_wiki {
+		text.push_str(&format!("default_wiki = {default_wiki:?}\n"));
+	}
+	text.push_str("\n[wikis]\n");
+	for (name, path) in wikis {
+		text.push_str(&format!("{name} = {:?}\n", path.display().to_string()));
+	}
+	text.push_str("\n[tokens]\n");
+	if let Some(token) = token {
+		text.push_str(&format!("{token:?} = \"admin\"\n"));
+	}
+	fs::write(path, text).unwrap();
 }
 
 /// Runs the command and parses stdout as one JSON object.
@@ -284,12 +302,13 @@ fn dir_and_server_together_is_a_usage_error() {
 		.args(["--server", "http://localhost:7448", "status"])
 		.assert()
 		.code(2);
-	// Env + flag: same usage error and exit code.
+	// Explicit remote targeting wins over a local env var; it then fails for the missing remote wiki.
 	let mut cmd = wikid_untargeted();
 	cmd.env("WIKID_DIR", vault.path())
 		.args(["--server", "http://localhost:7448", "status"])
 		.assert()
-		.code(2);
+		.code(1)
+		.stdout(predicate::str::starts_with("error[no_wiki]:"));
 }
 
 #[test]
@@ -307,6 +326,240 @@ fn remote_mode_without_a_wiki_is_a_structured_error() {
 		.assert()
 		.code(1)
 		.stdout(predicate::str::starts_with("error[no_wiki]:"));
+}
+
+#[test]
+fn config_fallback_precedence_flag_env_config_and_cwd_inside_wiki() {
+	let flag_vault = fixture_vault();
+	let env_vault = fixture_vault();
+	let config_vault = fixture_vault();
+	let home = TempDir::new().unwrap();
+	let cwd = TempDir::new().unwrap();
+	let config_path = cwd.path().join("wikid.toml");
+	write_config(
+		&config_path,
+		"127.0.0.1:7448",
+		&[("configured", config_vault.path())],
+		None,
+		None,
+	);
+
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.current_dir(cwd.path())
+		.arg("status")
+		.assert()
+		.success()
+		.stdout(predicate::str::contains(config_vault.path().display().to_string()));
+
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.env("WIKID_DIR", env_vault.path())
+		.current_dir(cwd.path())
+		.arg("status")
+		.assert()
+		.success()
+		.stdout(predicate::str::contains(env_vault.path().display().to_string()));
+
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.env("WIKID_DIR", env_vault.path())
+		.current_dir(cwd.path())
+		.args(["--dir"])
+		.arg(flag_vault.path())
+		.arg("status")
+		.assert()
+		.success()
+		.stdout(predicate::str::contains(flag_vault.path().display().to_string()));
+
+	let nested = config_vault.path().join("notes/deep");
+	fs::create_dir_all(&nested).unwrap();
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.current_dir(&nested)
+		.args(["--config"])
+		.arg(&config_path)
+		.args(["cat", "index.md"])
+		.assert()
+		.success()
+		.stdout(predicate::str::contains("# Home"));
+}
+
+#[test]
+fn config_fallback_default_and_multi_wiki_ambiguity() {
+	let one = fixture_vault();
+	let two = fixture_vault();
+	let cwd = TempDir::new().unwrap();
+	let config_path = cwd.path().join("wikid.toml");
+	write_config(
+		&config_path,
+		"127.0.0.1:7448",
+		&[("one", one.path()), ("two", two.path())],
+		Some("two"),
+		None,
+	);
+	wikid_untargeted()
+		.current_dir(cwd.path())
+		.arg("status")
+		.assert()
+		.success()
+		.stdout(predicate::str::contains(two.path().display().to_string()));
+
+	write_config(
+		&config_path,
+		"127.0.0.1:7448",
+		&[("one", one.path()), ("two", two.path())],
+		None,
+		None,
+	);
+	wikid_untargeted()
+		.current_dir(cwd.path())
+		.arg("status")
+		.assert()
+		.code(1)
+		.stdout(predicate::str::starts_with("error[ambiguous_wiki]:"))
+		.stdout(predicate::str::contains("one"))
+		.stdout(predicate::str::contains("two"))
+		.stdout(predicate::str::contains("default_wiki"));
+}
+
+#[test]
+fn explicit_local_flag_ignores_remote_env_and_explicit_remote_ignores_dir_env() {
+	let vault = fixture_vault();
+	wikid_untargeted()
+		.env("WIKID_SERVER", "http://127.0.0.1:1")
+		.args(["--dir"])
+		.arg(vault.path())
+		.arg("status")
+		.assert()
+		.success();
+	wikid_untargeted()
+		.env("WIKID_DIR", vault.path())
+		.args(["--server", "http://127.0.0.1:1", "--wiki", "main", "status"])
+		.assert()
+		.code(1)
+		.stdout(predicate::str::starts_with("error[transport]:"));
+}
+
+#[test]
+fn init_creates_skeleton_registers_config_and_is_idempotent() {
+	let home = TempDir::new().unwrap();
+	let wiki = TempDir::new().unwrap();
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.current_dir(wiki.path())
+		.arg("init")
+		.assert()
+		.success()
+		.stdout(predicate::str::contains("created:"))
+		.stdout(predicate::str::contains("registered:"))
+		.stdout(predicate::str::contains("not printed"));
+	for path in [
+		"index.md",
+		"log.md",
+		"AGENTS.md",
+		"raw",
+		"raw/assets",
+		"concepts",
+		"entities",
+		"questions",
+		"syntheses",
+	] {
+		assert!(wiki.path().join(path).exists(), "missing {path}");
+	}
+	let config_path = home.path().join(".config/wikid/config.toml");
+	let config = wikid_server::Config::load(&config_path).unwrap();
+	let name = wiki.path().file_name().unwrap().to_str().unwrap();
+	assert_eq!(config.default_wiki.as_deref(), Some(name));
+	assert_eq!(config.wikis[name], wiki.path().canonicalize().unwrap());
+	assert_eq!(
+		config.tokens.values().filter(|actor| actor.as_str() == "admin").count(),
+		1
+	);
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.current_dir(wiki.path())
+		.arg("status")
+		.assert()
+		.success();
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.current_dir(wiki.path())
+		.arg("init")
+		.assert()
+		.success()
+		.stdout(predicate::str::contains("skipped:"))
+		.stdout(predicate::str::contains("already registered"));
+	let config2 = wikid_server::Config::load(&config_path).unwrap();
+	assert_eq!(
+		config2
+			.tokens
+			.values()
+			.filter(|actor| actor.as_str() == "admin")
+			.count(),
+		1
+	);
+}
+
+#[test]
+fn init_partial_and_existing_vault_only_adds_missing_files() {
+	let home = TempDir::new().unwrap();
+	let wiki = TempDir::new().unwrap();
+	fs::create_dir_all(wiki.path().join("raw/assets")).unwrap();
+	fs::create_dir_all(wiki.path().join(".obsidian")).unwrap();
+	fs::write(wiki.path().join("index.md"), "# Existing\n").unwrap();
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.args(["init"])
+		.arg(wiki.path())
+		.assert()
+		.success()
+		.stdout(predicate::str::contains("skipped:"))
+		.stdout(predicate::str::contains("index.md"));
+	assert_eq!(
+		fs::read_to_string(wiki.path().join("index.md")).unwrap(),
+		"# Existing\n"
+	);
+	assert!(wiki.path().join("log.md").exists());
+	assert!(wiki.path().join("AGENTS.md").exists());
+}
+
+#[test]
+fn init_collision_suffix_and_token_show() {
+	let home = TempDir::new().unwrap();
+	let parent = TempDir::new().unwrap();
+	let first = parent.path().join("notes");
+	let second_parent = TempDir::new().unwrap();
+	let second = second_parent.path().join("notes");
+	fs::create_dir_all(&first).unwrap();
+	fs::create_dir_all(&second).unwrap();
+	for path in [&first, &second] {
+		wikid_untargeted()
+			.env("HOME", home.path())
+			.args(["init"])
+			.arg(path)
+			.assert()
+			.success();
+	}
+	let config_path = home.path().join(".config/wikid/config.toml");
+	let config = wikid_server::Config::load(&config_path).unwrap();
+	assert_eq!(config.wikis["notes"], first.canonicalize().unwrap());
+	assert_eq!(config.wikis["notes-2"], second.canonicalize().unwrap());
+	let token = config.tokens.keys().next().unwrap().clone();
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.args(["token", "show"])
+		.assert()
+		.success()
+		.stdout(predicate::str::starts_with(token.clone()));
+	let json = json_of(
+		wikid_untargeted()
+			.env("HOME", home.path())
+			.args(["token", "show", "admin", "--json"]),
+	);
+	assert_eq!(json["actor"], "admin");
+	assert_eq!(json["token"], token);
+	assert_eq!(json["config_path"], config_path.display().to_string());
 }
 
 #[test]
@@ -329,28 +582,83 @@ fn remote_mode_reports_unreachable_servers_as_transport_errors() {
 }
 
 #[test]
-fn serve_without_a_discoverable_config_is_a_structured_error() {
-	let empty_home = TempDir::new().unwrap();
+fn serve_without_config_bootstraps_config_and_prints_no_token_value() {
+	let home = TempDir::new().unwrap();
 	let cwd = TempDir::new().unwrap();
-	let mut cmd = Command::cargo_bin("wikid").unwrap();
-	clear_env(&mut cmd);
-	cmd.env("HOME", empty_home.path())
+	let bin = assert_cmd::cargo::cargo_bin("wikid");
+	let mut child = StdCommand::new(bin)
+		.env_remove("WIKID_CONFIG")
+		.env_remove("WIKID_DIR")
+		.env_remove("WIKID_SERVER")
+		.env("HOME", home.path())
 		.current_dir(cwd.path())
 		.arg("serve")
-		.assert()
-		.code(1)
-		.stdout(predicate::str::starts_with("error[no_config]:"))
-		.stdout(predicate::str::contains("wikid.toml"));
+		.stdout(Stdio::piped())
+		.stderr(Stdio::piped())
+		.spawn()
+		.unwrap();
+	let stdout = child.stdout.take().unwrap();
+	let mut reader = BufReader::new(stdout);
+	let mut startup = String::new();
+	for _ in 0..6 {
+		let mut line = String::new();
+		if reader.read_line(&mut line).unwrap() == 0 {
+			break;
+		}
+		startup.push_str(&line);
+		if startup.contains("wikid token show admin") {
+			break;
+		}
+	}
+	let _ = child.kill();
+	let _ = child.wait();
+	let config_path = home.path().join(".config/wikid/config.toml");
+	let config_text = fs::read_to_string(&config_path).unwrap();
+	let config = wikid_server::Config::from_toml(&config_text).unwrap();
+	let token = config.tokens.keys().next().unwrap();
+	assert_eq!(config.bind, "127.0.0.1:7448");
+	assert_eq!(
+		config.wikis[cwd.path().file_name().unwrap().to_str().unwrap()],
+		cwd.path().canonicalize().unwrap()
+	);
+	assert!(token.starts_with("wkd_"));
+	assert_eq!(token.len(), 68);
+	assert!(!startup.contains(token), "serve startup leaked token: {startup}");
+	assert!(startup.contains("created config:"), "startup: {startup}");
+	assert!(startup.contains("admin token written"), "startup: {startup}");
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt as _;
+		assert_eq!(fs::metadata(&config_path).unwrap().permissions().mode() & 0o777, 0o600);
+	}
 }
 
 #[test]
-fn serve_with_a_missing_config_file_fails_loudly() {
-	let mut cmd = wikid_untargeted();
-	cmd.args(["serve", "--config", "/nonexistent/wikid.toml"])
-		.assert()
-		.code(1)
-		.stdout(predicate::str::starts_with("error[config]:"))
-		.stdout(predicate::str::contains("/nonexistent/wikid.toml"));
+fn serve_json_startup_is_one_json_object() {
+	let home = TempDir::new().unwrap();
+	let cwd = TempDir::new().unwrap();
+	let config_path = home.path().join("missing/wikid.toml");
+	let bin = assert_cmd::cargo::cargo_bin("wikid");
+	let mut child = StdCommand::new(bin)
+		.env_remove("WIKID_CONFIG")
+		.env("HOME", home.path())
+		.current_dir(cwd.path())
+		.args(["--json", "--config"])
+		.arg(&config_path)
+		.arg("serve")
+		.stdout(Stdio::piped())
+		.stderr(Stdio::piped())
+		.spawn()
+		.unwrap();
+	let stdout = child.stdout.take().unwrap();
+	let mut line = String::new();
+	BufReader::new(stdout).read_line(&mut line).unwrap();
+	let _ = child.kill();
+	let _ = child.wait();
+	let value: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("bad json {e}: {line}"));
+	assert_eq!(value["bootstrapped"], true);
+	assert_eq!(value["config_path"], config_path.display().to_string());
+	assert!(value["admin_token"].as_str().unwrap().contains("not printed"));
 }
 
 // --- read commands: flags and ignore rules ---

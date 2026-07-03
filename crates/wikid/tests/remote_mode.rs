@@ -85,6 +85,24 @@ fn spawn_server(vault: &Path) -> ServerGuard {
 	guard
 }
 
+fn spawn_server_with_config(config_path: &Path, base: String, config_dir: TempDir) -> ServerGuard {
+	let child = ServeCommand::new(env!("CARGO_BIN_EXE_wikid"))
+		.arg("serve")
+		.arg("--config")
+		.arg(config_path)
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.spawn()
+		.expect("spawn wikid serve");
+	let guard = ServerGuard {
+		child,
+		base,
+		_config_dir: config_dir,
+	};
+	wait_for_health(&guard.base);
+	guard
+}
+
 fn wait_for_health(base: &str) {
 	let url = format!("{base}/health");
 	let deadline = Instant::now() + Duration::from_secs(10);
@@ -137,6 +155,55 @@ fn assert_read_parity(vault: &Path, base: &str, args: &[&str]) {
 	let (local_json, _) = local(vault, &json_args);
 	let (remote_json, _) = remote(base, &json_args);
 	assert_eq!(remote_json, local_json, "--json parity for {args:?}");
+}
+
+#[test]
+fn init_then_serve_then_remote_status_end_to_end() {
+	let home = TempDir::new().unwrap();
+	let vault = TempDir::new().unwrap();
+	let mut init = Command::cargo_bin("wikid").expect("binary builds");
+	clear_env(&mut init);
+	init.env("HOME", home.path())
+		.arg("init")
+		.arg(vault.path())
+		.assert()
+		.success();
+	let config_path = home.path().join(".config/wikid/config.toml");
+	let token_stdout = {
+		let mut token_cmd = Command::cargo_bin("wikid").expect("binary builds");
+		clear_env(&mut token_cmd);
+		let output = token_cmd
+			.env("HOME", home.path())
+			.args(["token", "show"])
+			.output()
+			.unwrap();
+		assert!(output.status.success());
+		String::from_utf8(output.stdout).unwrap()
+	};
+	let token = token_stdout.lines().next().unwrap().to_owned();
+	let port = free_port();
+	let mut config = wikid_server::Config::load(&config_path).unwrap();
+	config.bind = format!("127.0.0.1:{port}");
+	wikid_server::config::save(&config_path, &config).unwrap();
+	let server = spawn_server_with_config(&config_path, format!("http://127.0.0.1:{port}"), home);
+	let wiki = config.default_wiki.as_deref().unwrap();
+	let mut remote_status = Command::cargo_bin("wikid").expect("binary builds");
+	clear_env(&mut remote_status);
+	remote_status
+		.args([
+			"--server",
+			server.base.as_str(),
+			"--token",
+			token.as_str(),
+			"--wiki",
+			wiki,
+			"status",
+		])
+		.assert()
+		.success()
+		.stdout(predicates::str::contains(
+			vault.path().canonicalize().unwrap().display().to_string(),
+		));
 }
 
 #[test]

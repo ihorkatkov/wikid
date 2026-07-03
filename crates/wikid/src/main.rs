@@ -8,8 +8,8 @@ mod error;
 mod remote;
 mod render;
 
-use std::io::Read;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
@@ -44,6 +44,10 @@ struct Cli {
 	#[arg(long, global = true, value_name = "NAME")]
 	wiki: Option<String>,
 
+	/// Config file ($WIKID_CONFIG → ./wikid.toml → ~/.config/wikid/config.toml)
+	#[arg(long, global = true, value_name = "PATH")]
+	config: Option<String>,
+
 	/// Emit the result as one JSON object instead of human text
 	#[arg(long, global = true)]
 	json: bool,
@@ -55,10 +59,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
 	/// Run the daemon serving configured wikis
-	Serve {
-		/// Config file ($WIKID_CONFIG → ./wikid.toml → ~/.config/wikid/config.toml)
-		#[arg(long, value_name = "PATH")]
-		config: Option<String>,
+	Serve,
+	/// Initialize a blank LLM Wiki skeleton and register it in config
+	Init { path: Option<String> },
+	/// Show configured tokens (explicit secret-revealing commands)
+	Token {
+		#[command(subcommand)]
+		command: TokenCommand,
 	},
 	/// Show page counts, recent activity, and health summary
 	Status,
@@ -144,6 +151,12 @@ enum Command {
 	},
 }
 
+#[derive(Subcommand)]
+enum TokenCommand {
+	/// Print the token for an actor from the local config
+	Show { actor: Option<String> },
+}
+
 /// A successful command's output and exit code (grep exits 1 on zero
 /// matches, coreutils-faithful — AXI checklist item 5).
 struct Outcome {
@@ -176,14 +189,20 @@ fn main() {
 fn run(cli: Cli) -> Result<Outcome, CliError> {
 	// AXI checklist item 1: no arguments shows live data, never help text.
 	let command = cli.command.unwrap_or(Command::Status);
-	if let Command::Serve { config } = command {
-		return run_serve(config.as_deref());
-	}
-	let dir = cli.dir.or_else(|| env_var("WIKID_DIR"));
-	let server = cli.server.or_else(|| env_var("WIKID_SERVER"));
+	let command = match command {
+		Command::Serve => return run_serve(cli.config.as_deref(), cli.json),
+		Command::Init { path } => return run_init(path.as_deref(), cli.config.as_deref(), cli.json),
+		Command::Token { command } => return run_token(command, cli.config.as_deref(), cli.json),
+		other => other,
+	};
+	let explicit_dir = cli.dir;
+	let explicit_server = cli.server;
+	let explicit_remote = explicit_server.is_some() || cli.token.is_some() || cli.wiki.is_some();
+	let dir = explicit_dir.or_else(|| (!explicit_remote).then(|| env_var("WIKID_DIR")).flatten());
+	let server = explicit_server.or_else(|| dir.is_none().then(|| env_var("WIKID_SERVER")).flatten());
 	if dir.is_some() && server.is_some() {
-		// Flag-vs-flag conflicts are caught by clap itself; this covers the
-		// env-supplied combinations with the same usage error and exit code 2.
+		// Flag-vs-flag conflicts are caught by clap itself; this covers env-only
+		// local+remote targeting. Explicit flags win over opposite-mode env vars.
 		Cli::command()
 			.error(
 				clap::error::ErrorKind::ArgumentConflict,
@@ -210,6 +229,8 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 			other => CliError::from(other),
 		})?;
 		Backend::Local(vault)
+	} else if let Some(resolved) = resolve_config_target(cli.config.as_deref())? {
+		Backend::Local(Vault::open(&resolved.path)?)
 	} else {
 		return Err(CliError::no_target());
 	};
@@ -219,9 +240,18 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 /// `wikid serve` (DESIGN §6): discover the config (arg → `$WIKID_CONFIG` →
 /// `./wikid.toml` → `~/.config/wikid/config.toml`), then run `wikid-server`
 /// on a tokio runtime until stopped. The rest of the CLI stays sync.
-fn run_serve(config: Option<&str>) -> Result<Outcome, CliError> {
-	let path = wikid_server::config::discover(config.map(Path::new)).ok_or_else(CliError::no_config)?;
-	let config = wikid_server::Config::load(&path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+fn run_serve(config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> {
+	let requested = config_arg.map(Path::new);
+	let cwd = std::env::current_dir().map_err(io_error)?;
+	let (path, config, bootstrapped) = load_or_bootstrap_config(requested, &cwd)?;
+	let startup = ServeStartup::from_config(&path, &config, bootstrapped);
+	let startup_text = if json {
+		serde_json::to_string(&startup).expect("startup serializes")
+	} else {
+		render_serve_startup(&startup)
+	};
+	println!("{startup_text}");
+	std::io::stdout().flush().map_err(io_error)?;
 	tracing_subscriber::fmt()
 		.with_env_filter(
 			tracing_subscriber::EnvFilter::try_from_default_env()
@@ -235,6 +265,410 @@ fn run_serve(config: Option<&str>) -> Result<Outcome, CliError> {
 		.map_err(|err| CliError::new("serve", format!("{err:#}"), None))?;
 	Ok(Outcome::ok("wikid-server stopped".to_owned()))
 }
+
+fn run_init(path: Option<&str>, config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> {
+	let root = match path {
+		Some(path) => PathBuf::from(path),
+		None => std::env::current_dir().map_err(io_error)?,
+	};
+	std::fs::create_dir_all(&root).map_err(io_error)?;
+	let root = root.canonicalize().map_err(io_error)?;
+	let scaffold = create_skeleton(&root)?;
+	let config_path = wikid_server::config::write_target(config_arg.map(Path::new)).ok_or_else(CliError::no_config)?;
+	let (mut config, existed) = load_config_for_write(&config_path)?;
+	let registration = register_wiki(&mut config, &root);
+	ensure_admin_token(&mut config)?;
+	wikid_server::config::save(&config_path, &config)
+		.map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+	let result = InitResult {
+		path: root.display().to_string(),
+		config_path: config_path.display().to_string(),
+		wiki_name: registration.name,
+		registered: registration.registered,
+		config_created: !existed,
+		created: scaffold.created,
+		skipped: scaffold.skipped,
+	};
+	Ok(Outcome::ok(emit(json, &result, || render_init(&result))))
+}
+
+fn run_token(command: TokenCommand, config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> {
+	match command {
+		TokenCommand::Show { actor } => {
+			let path = wikid_server::config::discover(config_arg.map(Path::new)).ok_or_else(CliError::no_config)?;
+			let config =
+				wikid_server::Config::load(&path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+			let actor = actor.unwrap_or_else(|| "admin".to_owned());
+			let mut matches: Vec<_> = config.tokens.iter().filter(|(_, name)| *name == &actor).collect();
+			if matches.is_empty() {
+				return Err(CliError::new(
+					"token_not_found",
+					format!("no token configured for actor {actor:?}"),
+					Some(format!("inspect [tokens] in {}", path.display())),
+				));
+			}
+			if matches.len() > 1 {
+				return Err(CliError::new(
+					"ambiguous_token",
+					format!("multiple tokens configured for actor {actor:?}"),
+					Some(format!("open {} and choose the token explicitly", path.display())),
+				));
+			}
+			let (token, actor) = matches.pop().unwrap();
+			let result = TokenShowResult {
+				actor: actor.clone(),
+				token: token.clone(),
+				config_path: path.display().to_string(),
+			};
+			Ok(Outcome::ok(emit(json, &result, || render_token(&result))))
+		}
+	}
+}
+
+#[derive(Debug, Serialize)]
+struct InitResult {
+	path: String,
+	config_path: String,
+	wiki_name: String,
+	registered: bool,
+	config_created: bool,
+	created: Vec<String>,
+	skipped: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenShowResult {
+	actor: String,
+	token: String,
+	config_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ServeStartup {
+	config_path: String,
+	bind: String,
+	bootstrapped: bool,
+	wikis: Vec<WikiRegistration>,
+	admin_token: String,
+}
+
+impl ServeStartup {
+	fn from_config(path: &Path, config: &wikid_server::Config, bootstrapped: bool) -> Self {
+		Self {
+			config_path: path.display().to_string(),
+			bind: config.bind.clone(),
+			bootstrapped,
+			wikis: config
+				.wikis
+				.iter()
+				.map(|(name, path)| WikiRegistration {
+					name: name.clone(),
+					path: path.display().to_string(),
+				})
+				.collect(),
+			admin_token: format!("admin token written to {} (not printed)", path.display()),
+		}
+	}
+}
+
+#[derive(Debug, Serialize)]
+struct WikiRegistration {
+	name: String,
+	path: String,
+}
+
+struct ScaffoldResult {
+	created: Vec<String>,
+	skipped: Vec<String>,
+}
+
+struct RegisterResult {
+	name: String,
+	registered: bool,
+}
+
+struct ConfigTarget {
+	path: PathBuf,
+}
+
+fn load_or_bootstrap_config(
+	requested: Option<&Path>,
+	cwd: &Path,
+) -> Result<(PathBuf, wikid_server::Config, bool), CliError> {
+	if let Some(path) = wikid_server::config::discover(requested)
+		&& path.is_file()
+	{
+		let config =
+			wikid_server::Config::load(&path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+		return Ok((path, config, false));
+	}
+	let path = wikid_server::config::write_target(requested).ok_or_else(CliError::no_config)?;
+	let mut config = wikid_server::Config::empty();
+	let cwd = cwd.canonicalize().map_err(io_error)?;
+	register_wiki(&mut config, &cwd);
+	ensure_admin_token(&mut config)?;
+	wikid_server::config::save(&path, &config).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+	Ok((path, config, true))
+}
+
+fn load_config_for_write(path: &Path) -> Result<(wikid_server::Config, bool), CliError> {
+	if path.is_file() {
+		let config =
+			wikid_server::Config::load(path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+		Ok((config, true))
+	} else {
+		Ok((wikid_server::Config::empty(), false))
+	}
+}
+
+fn register_wiki(config: &mut wikid_server::Config, root: &Path) -> RegisterResult {
+	let before = config.wikis.len();
+	if let Some((name, _)) = config.wikis.iter().find(|(_, path)| canonical_eq(path, root)) {
+		return RegisterResult {
+			name: name.clone(),
+			registered: false,
+		};
+	}
+	let base = root.file_name().and_then(|name| name.to_str()).unwrap_or("wiki");
+	let name = unique_wiki_name(config, base);
+	config.wikis.insert(name.clone(), root.to_path_buf());
+	if before == 0 && config.default_wiki.is_none() {
+		config.default_wiki = Some(name.clone());
+	}
+	RegisterResult { name, registered: true }
+}
+
+fn unique_wiki_name(config: &wikid_server::Config, base: &str) -> String {
+	if !config.wikis.contains_key(base) {
+		return base.to_owned();
+	}
+	for n in 2.. {
+		let candidate = format!("{base}-{n}");
+		if !config.wikis.contains_key(&candidate) {
+			return candidate;
+		}
+	}
+	unreachable!()
+}
+
+fn canonical_eq(path: &Path, root: &Path) -> bool {
+	path.canonicalize().map(|path| path == root).unwrap_or(false)
+}
+
+fn ensure_admin_token(config: &mut wikid_server::Config) -> Result<(), CliError> {
+	if config.tokens.values().any(|actor| actor == "admin") {
+		return Ok(());
+	}
+	config.tokens.insert(generate_token()?, "admin".to_owned());
+	Ok(())
+}
+
+fn generate_token() -> Result<String, CliError> {
+	let mut bytes = [0u8; 32];
+	std::fs::File::open("/dev/urandom")
+		.and_then(|mut file| file.read_exact(&mut bytes))
+		.map_err(|err| {
+			CliError::new(
+				"token_generation",
+				format!("failed to read random bytes from /dev/urandom: {err}"),
+				Some("/dev/urandom is required for no-dependency token generation on this platform".to_owned()),
+			)
+		})?;
+	let mut token = String::from("wkd_");
+	for byte in bytes {
+		token.push_str(&format!("{byte:02x}"));
+	}
+	Ok(token)
+}
+
+fn create_skeleton(root: &Path) -> Result<ScaffoldResult, CliError> {
+	let mut created = Vec::new();
+	let mut skipped = Vec::new();
+	for dir in ["raw", "raw/assets", "concepts", "entities", "questions", "syntheses"] {
+		let path = root.join(dir);
+		if path.exists() {
+			skipped.push(format!("{dir}/"));
+		} else {
+			std::fs::create_dir_all(&path).map_err(io_error)?;
+			created.push(format!("{dir}/"));
+		}
+	}
+	for (path, content) in INIT_FILES {
+		let target = root.join(path);
+		if target.exists() {
+			skipped.push((*path).to_owned());
+		} else {
+			std::fs::write(&target, content).map_err(io_error)?;
+			created.push((*path).to_owned());
+		}
+	}
+	Ok(ScaffoldResult { created, skipped })
+}
+
+fn resolve_config_target(config_arg: Option<&str>) -> Result<Option<ConfigTarget>, CliError> {
+	let Some(path) = wikid_server::config::discover(config_arg.map(Path::new)) else {
+		return Ok(None);
+	};
+	let config = wikid_server::Config::load(&path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+	let cwd = std::env::current_dir()
+		.map_err(io_error)?
+		.canonicalize()
+		.map_err(io_error)?;
+	if let Some((_, path)) = config
+		.wikis
+		.iter()
+		.filter_map(|(name, path)| path.canonicalize().ok().map(|path| (name, path)))
+		.filter(|(_, path)| cwd.starts_with(path))
+		.max_by_key(|(_, path)| path.components().count())
+	{
+		return Ok(Some(ConfigTarget { path }));
+	}
+	if config.wikis.len() == 1 {
+		return Ok(Some(ConfigTarget {
+			path: config.wikis.values().next().unwrap().clone(),
+		}));
+	}
+	if config.wikis.is_empty() {
+		return Ok(None);
+	}
+	if let Some(default) = &config.default_wiki
+		&& let Some(path) = config.wikis.get(default)
+	{
+		return Ok(Some(ConfigTarget { path: path.clone() }));
+	}
+	let names = config.wikis.keys().cloned().collect::<Vec<_>>().join(", ");
+	Err(CliError::new(
+		"ambiguous_wiki",
+		format!("multiple wikis registered: {names}"),
+		Some(format!("set default_wiki in {} or pass --dir/--wiki", path.display())),
+	))
+}
+
+fn render_init(result: &InitResult) -> String {
+	let mut lines = vec![format!("initialized wiki: {}", result.path)];
+	if !result.created.is_empty() {
+		lines.push(format!("created: {}", result.created.join(", ")));
+	}
+	if !result.skipped.is_empty() {
+		lines.push(format!("skipped: {}", result.skipped.join(", ")));
+	}
+	let action = if result.registered {
+		"registered"
+	} else {
+		"already registered"
+	};
+	lines.push(format!("{action}: {} -> {}", result.wiki_name, result.path));
+	lines.push(format!("config: {}", result.config_path));
+	lines.push("admin token: written to config (not printed)".to_owned());
+	lines.push("hint: wikid status — inspect this wiki".to_owned());
+	lines.push("hint: wikid serve — serve registered wikis".to_owned());
+	lines.join("\n")
+}
+
+fn render_token(result: &TokenShowResult) -> String {
+	format!(
+		"{}\nhint: token for actor {:?} from {}",
+		result.token, result.actor, result.config_path
+	)
+}
+
+fn render_serve_startup(startup: &ServeStartup) -> String {
+	let mut lines = Vec::new();
+	if startup.bootstrapped {
+		lines.push(format!("created config: {}", startup.config_path));
+	} else {
+		lines.push(format!("config: {}", startup.config_path));
+	}
+	lines.push(format!("serving: http://{}", startup.bind));
+	for wiki in &startup.wikis {
+		lines.push(format!("wiki: {} -> {}", wiki.name, wiki.path));
+	}
+	lines.push(startup.admin_token.clone());
+	lines.push(format!(
+		"hint: wikid token show admin --config {} — print the admin token",
+		startup.config_path
+	));
+	lines.join("\n")
+}
+
+fn io_error(err: std::io::Error) -> CliError {
+	CliError::new("io", err.to_string(), None)
+}
+
+const INIT_FILES: &[(&str, &str)] = &[
+	("index.md", INDEX_TEMPLATE),
+	("log.md", LOG_TEMPLATE),
+	("AGENTS.md", AGENTS_TEMPLATE),
+];
+
+const INDEX_TEMPLATE: &str = r#"# Index
+
+This is the content-oriented catalog for this LLM Wiki. The maintaining agent updates it on every ingest, query, or synthesis worth keeping.
+
+## Sources
+
+Raw inputs live in `raw/`. Add each processed source here with a one-line summary and link to any generated pages.
+
+## Entities
+
+Entity pages live in `entities/`.
+
+## Concepts
+
+Concept pages live in `concepts/`.
+
+## Questions
+
+Reusable questions and answered queries live in `questions/`.
+
+## Syntheses
+
+Durable analyses, comparisons, and briefs live in `syntheses/`.
+"#;
+
+const LOG_TEMPLATE: &str = r#"# Log
+
+Append one entry per meaningful maintenance action. Keep the prefix parseable:
+
+## [YYYY-MM-DD] ingest | <title>
+
+## [YYYY-MM-DD] query | <title>
+
+## [YYYY-MM-DD] lint | <title>
+"#;
+
+const AGENTS_TEMPLATE: &str = r#"# LLM Wiki Agent Instructions
+
+This directory is a blank LLM Wiki: a plain-Markdown knowledge base maintained by an LLM agent.
+
+## Architecture
+
+- `raw/` contains immutable sources. Read these files, but do not rewrite them except by explicit human request.
+- `raw/assets/` contains local images and attachments referenced by raw sources.
+- `concepts/`, `entities/`, `questions/`, and `syntheses/` contain compiled wiki pages. The agent owns and maintains these pages.
+- `index.md` is the content catalog. Update it whenever pages are created or materially changed.
+- `log.md` is the chronological maintenance log. Append entries with `## [YYYY-MM-DD] <ingest|query|lint> | <title>`.
+
+## Conventions
+
+- Use `[[wikilinks]]` for internal links.
+- Prefer short pages with clear headings.
+- Preserve raw evidence and separate it from synthesis.
+- When answering a reusable question, consider filing the answer under `questions/` or `syntheses/`.
+- When ingesting a source, update relevant concept/entity pages, then update `index.md` and `log.md`.
+- When linting, look for broken links, orphan pages, stale claims, contradictions, and missing pages.
+
+## wikid CLI
+
+- `wikid status` shows the selected wiki's overview.
+- `wikid grep <pattern>` searches wiki content.
+- `wikid cat <path>` reads a page.
+- `wikid links <path>` shows outgoing links and backlinks.
+- `wikid doctor` checks structural health.
+- `wikid serve` exposes registered wikis over HTTP.
+
+Paths are wiki-root-relative, even when the shell cwd is inside a subdirectory of the wiki.
+"#;
 
 /// The targeted wiki: a local directory or a remote daemon. Both expose the
 /// same operations returning the shared core structs, so `dispatch` renders
@@ -335,7 +769,7 @@ impl Backend {
 
 fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, CliError> {
 	match command {
-		Command::Serve { .. } => unreachable!("handled in run()"),
+		Command::Serve | Command::Init { .. } | Command::Token { .. } => unreachable!("handled in run()"),
 		Command::Status => {
 			let status = backend.status()?;
 			Ok(Outcome::ok(emit(json, &status, || render::status(&status))))

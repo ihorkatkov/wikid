@@ -2,11 +2,20 @@
 #
 # Discovery order when --config is omitted:
 #   $WIKID_CONFIG → ./wikid.toml → ~/.config/wikid/config.toml
+#
+# For writes/bootstrap (`wikid init`, `wikid serve` with no config), explicit
+# --config and $WIKID_CONFIG are honored even when the file does not yet exist;
+# otherwise an existing ./wikid.toml wins, then the global path is used.
 
 # Address the daemon listens on. Default: 127.0.0.1:7448.
 # Binding beyond loopback requires at least one token — auth-less serving is
 # refused off-loopback.
 bind = "127.0.0.1:7448"
+
+# Optional fallback when zero-target local commands are run outside any
+# registered wiki and more than one wiki is configured. `wikid init`/bootstrap
+# set this only for the first registration into an empty config.
+default_wiki = "projects"
 
 # Wiki name → directory of Markdown files. An existing Obsidian vault works
 # as-is. Every remote call is scoped by one of these names (`--wiki <name>`).
@@ -14,7 +23,9 @@ bind = "127.0.0.1:7448"
 projects = "/home/you/wikis/projects"
 notes = "/home/you/notes"
 
-# Bearer token → actor name. Actor names appear in the request log.
+# Bearer token → actor name. Actor names appear in the request log. The token
+# string is the secret. `wikid serve` and `wikid init` never print generated
+# token values; use `wikid token show admin` when you explicitly need it.
 # Leave the table out entirely to serve loopback-only without auth.
 [tokens]
 "wkd_change_me" = "agent-vm-1"

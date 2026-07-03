@@ -61,7 +61,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 
 ## 6. CLI
 
-**Targeting.** Local mode: `--dir <path>` or `$WIKID_DIR`. Remote mode: `--server <url>` + `--token <t>` + `--wiki <name>` or `$WIKID_SERVER`/`$WIKID_TOKEN`/`$WIKID_WIKI`. Both given → usage error. Neither → structured error explaining both options. Remote mode maps commands 1:1 onto the HTTP API and renders identically (deserializes the shared core structs). `--wiki` is required in remote mode (missing → structured `no_wiki` error); `--token` is optional so auth-less loopback daemons work. HTTP error bodies re-render verbatim as the same `error[<code>]` with exit 1; connection/decode failures use the CLI-level `transport` code, unrecognized error bodies `http`. `serve` with no discoverable config → `no_config`; an unloadable config → `config`.
+**Targeting.** Local mode: `--dir <path>` or `$WIKID_DIR`. Remote mode: `--server <url>` + `--token <t>` + `--wiki <name>` or `$WIKID_SERVER`/`$WIKID_TOKEN`/`$WIKID_WIKI`. Explicit flags win over env; opposite-mode env vars are ignored when an explicit local/remote flag is present. Env-only local+remote targets → usage error. If neither local nor remote targeting is selected, commands fall back to config discovery (`--config`, `$WIKID_CONFIG`, `./wikid.toml`, `~/.config/wikid/config.toml`) and use local mode by choosing the registered wiki whose canonical path contains cwd (longest prefix), else the only registered wiki, else `default_wiki`. Multiple registered wikis with no valid default → structured `ambiguous_wiki` listing names and hinting to set `default_wiki` or pass a target. Remote mode maps commands 1:1 onto the HTTP API and renders identically (deserializes the shared core structs). `--wiki` is required in remote mode (missing → structured `no_wiki` error); `--token` is optional so auth-less loopback daemons work. HTTP error bodies re-render verbatim as the same `error[<code>]` with exit 1; connection/decode failures use the CLI-level `transport` code, unrecognized error bodies `http`.
 
 **Output.** Human-readable compact text by default; `--json` on every command emits the core result struct as JSON (one object, stdout). Errors (both modes): stdout, exit 1, format `error[<code>]: <message>` + optional `hint: …` line; `--json` errors: `{"error":{"code","message","hint"}}`. Usage errors: clap default (exit 2).
 
@@ -76,6 +76,8 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 
 **Commands and flags** (coreutils-faithful; unknown flags fail with exit 2 and clap's suggestion):
 
+- `init [path]` — create a blank LLM Wiki scaffold and register it in config. It creates `index.md`, `log.md`, `AGENTS.md`, and `raw/`, `raw/assets/`, `concepts/`, `entities/`, `questions/`, `syntheses/`; never overwrites existing files; works in non-empty directories and Obsidian vaults; writes/updates config idempotently.
+- `token show [actor]` — explicit secret-revealing local command. Defaults to `admin`; prints exactly one matching token or errors on none/multiple. JSON shape: `{actor, token, config_path}`.
 - `status`
 - `ls [path]` (depth 1), `tree [path]` (`--depth`, default 3)
 - `cat <path>` `--full`
@@ -87,7 +89,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 - `rm <path> --force`
 - `links <path>`
 - `doctor` `--stale-days <n>` `--checks <a,b,c>`
-- `serve` `--config <path>` (default: `$WIKID_CONFIG` → `./wikid.toml` → `~/.config/wikid/config.toml`)
+- `serve` `--config <path>` (discovery: `--config` → `$WIKID_CONFIG` → `./wikid.toml` → `~/.config/wikid/config.toml`; write target for bootstrap/mutation: explicit/env path even if absent, else existing `./wikid.toml`, else global config)
 
 ## 7. HTTP API (`wikid-server`)
 
@@ -107,7 +109,8 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
   - `POST /v1/wikis/{wiki}/mv` body `{from, to, force}`
   - `DELETE /v1/wikis/{wiki}/pages?path=&force=true` (`force` missing → 400 `force_required`, the same code and shape as the CLI's `rm` refusal with wording adapted to the wire: `force=true` instead of `--force`)
 - Success bodies are the core structs serialized directly. `WikidError` → status mapping: `NotFound`/`unknown_wiki` 404, `InvalidPath`/`BadPattern`/usage 400, `AlreadyExists`/`Ambiguous` 409, `NoMatch` 404, `NotUtf8` 415, `Io` 500. Body always `{"error":{"code","message","hint"}}`.
-- Config (TOML, see `wikid-server::config`): `bind` (default `127.0.0.1:7448`), `[wikis] name = "/path"`, `[tokens] "token" = "actor-name"`. Actor names are logged (`tracing`) but not otherwise used in MVP — attribution is deferred by SPEC.
+- Config (TOML, see `wikid-server::config`): `bind` (default `127.0.0.1:7448`), optional `default_wiki`, `[wikis] name = "/path"`, `[tokens] "actual_secret" = "actor-name"`. Actor names are logged (`tracing`) but not otherwise used in MVP — attribution is deferred by SPEC. Config rewrites preserve keys/values (comments may be lost), use temp+rename where feasible, and set Unix mode `0600`.
+- `serve` with no config found bootstraps the write target, registers cwd under its directory name (collision suffix `name-2`, `name-3`, …), generates one `admin` token from 32 bytes of `/dev/urandom` hex-encoded with `wkd_`, prints startup info without the token value, flushes stdout, then serves immediately. `serve --json` prints exactly one startup object to stdout before serving; logs must not corrupt stdout.
 - Startup validates every wiki dir exists (fail fast) and warns loudly when `tokens` is empty and bind is non-loopback (auth-less non-local serving is refused).
 
 ## 8. Testing strategy

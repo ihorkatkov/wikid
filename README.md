@@ -10,55 +10,50 @@ Point `wikid serve` at a directory of Markdown files — an Obsidian vault works
 cargo install --path crates/wikid
 ```
 
+### First run
+
+Create a blank Karpathy-style LLM Wiki scaffold and register it in config:
+
+```sh
+wikid init ~/notes
+wikid status                 # no --dir needed when config can identify the wiki
+```
+
+`init` creates `index.md`, `log.md`, `AGENTS.md`, and `raw/`, `raw/assets/`, `concepts/`, `entities/`, `questions/`, `syntheses/`. It never overwrites existing files, so it is safe in a non-empty directory or existing Obsidian vault.
+
 ### Local mode
 
-Any directory of Markdown files is already a wiki:
+Any directory of Markdown files is already a wiki. Target explicitly, via env, or via config fallback:
 
 ```sh
-wikid --dir ~/notes            # no-arg default = status: pages, recent, health
-wikid --dir ~/notes ls
-wikid --dir ~/notes grep "auth flow"
-wikid --dir ~/notes cat projects/architecture.md
-```
-
-Set `WIKID_DIR` once and drop the flag:
-
-```sh
+wikid --dir ~/notes status
 export WIKID_DIR=~/notes
-wikid write projects/decisions.md -m "# Decisions"
-wikid edit projects/decisions.md --old "# Decisions" --new "# Decisions (draft)"
-wikid links projects/decisions.md
-wikid rm projects/decisions.md --force
-wikid doctor
+wikid grep "auth flow"
+wikid cat projects/architecture.md
 ```
+
+When neither `--dir` nor remote flags are set, wikid reads config (`--config`, `$WIKID_CONFIG`, `./wikid.toml`, then `~/.config/wikid/config.toml`) and chooses the wiki containing the current directory, the only registered wiki, or `default_wiki`.
 
 Every command takes `--json` to emit the result as one JSON object.
 
 ### Serve + remote mode
 
-On the machine that owns the wiki, write a config (see
-[docs/wikid.example.toml](docs/wikid.example.toml)) and start the daemon:
+On the machine that owns the wiki, start the daemon. If no config exists, `serve` creates `~/.config/wikid/config.toml`, registers the current directory, generates an admin token, prints where it was written (not the secret), then serves immediately:
 
 ```sh
-cat > wikid.toml <<'EOF'
-bind = "127.0.0.1:7448"
-
-[wikis]
-projects = "/home/you/wikis/projects"
-
-[tokens]
-"wkd_change_me" = "agent-vm-1"
-EOF
-
-wikid serve    # config discovery: --config → $WIKID_CONFIG → ./wikid.toml → ~/.config/wikid/config.toml
+cd ~/notes
+wikid serve
+wikid token show admin       # explicit secret-revealing command
 ```
+
+You can also maintain config manually; see [docs/wikid.example.toml](docs/wikid.example.toml).
 
 From any VM, any agent — same commands, same output, over HTTP:
 
 ```sh
 export WIKID_SERVER=http://127.0.0.1:7448
-export WIKID_TOKEN=wkd_change_me
-export WIKID_WIKI=projects
+export WIKID_TOKEN=$(wikid token show admin | head -1)
+export WIKID_WIKI=notes
 
 wikid status
 wikid grep "auth flow"
@@ -102,6 +97,17 @@ render identically. MCP is the next milestone.
 cargo build
 cargo test
 ```
+
+### Boxd worktrees
+
+`boxd-worktree` creates a fast, deterministic boxd fork from the warm `wikid-golden` VM and checks out a new branch inside the fork:
+
+```sh
+cargo run --bin boxd-worktree -- create neo-123-demo
+cargo run --bin boxd-worktree -- --json create neo-123-demo --name wikid-neo-123-demo
+```
+
+It fails if the target VM or branch already exists, destroys a partially-created fork on setup failure, restarts `wikid serve`, and prints the fork URL plus SSH command.
 
 Workspace layout:
 

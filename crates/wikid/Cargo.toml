@@ -10,6 +10,10 @@ repository.workspace = true
 name = "wikid"
 path = "src/main.rs"
 
+[[bin]]
+name = "boxd-worktree"
+path = "src/bin/boxd-worktree.rs"
+
 [dependencies]
 wikid-core.workspace = true
 wikid-server.workspace = true

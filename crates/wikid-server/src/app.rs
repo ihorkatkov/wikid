@@ -392,6 +392,7 @@ mod tests {
 	fn test_app(dir: &TempDir) -> Router {
 		let config = Config {
 			bind: "127.0.0.1:0".to_owned(),
+			default_wiki: None,
 			wikis: BTreeMap::from([("main".to_owned(), dir.path().to_path_buf())]),
 			tokens: BTreeMap::from([(TOKEN.to_owned(), "tester".to_owned())]),
 		};
@@ -810,6 +811,7 @@ mod tests {
 	async fn from_config_fails_fast_on_missing_wiki_dir() {
 		let config = Config {
 			bind: "127.0.0.1:0".to_owned(),
+			default_wiki: None,
 			wikis: BTreeMap::from([("ghost".to_owned(), PathBuf::from("/nonexistent/wiki"))]),
 			tokens: BTreeMap::new(),
 		};

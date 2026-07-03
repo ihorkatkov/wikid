@@ -72,6 +72,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let config = Config {
 			bind: "0.0.0.0:0".to_owned(),
+			default_wiki: None,
 			wikis: BTreeMap::from([("main".to_owned(), dir.path().to_path_buf())]),
 			tokens: BTreeMap::new(),
 		};
@@ -83,6 +84,7 @@ mod tests {
 	async fn serve_fails_fast_when_a_wiki_dir_is_missing() {
 		let config = Config {
 			bind: "127.0.0.1:0".to_owned(),
+			default_wiki: None,
 			wikis: BTreeMap::from([("ghost".to_owned(), PathBuf::from("/nonexistent/wiki"))]),
 			tokens: BTreeMap::from([("t".to_owned(), "actor".to_owned())]),
 		};
