@@ -78,7 +78,9 @@ wikid grep "auth flow"
 
 ## Configuration
 
-One TOML file drives everything — see [docs/wikid.example.toml](docs/wikid.example.toml) for the annotated version. Discovery order: `--config` flag → `$WIKID_CONFIG` → `./wikid.toml` → `~/.config/wikid/config.toml`. `wikid serve` and `wikid init` bootstrap it for you, or maintain it by hand:
+One TOML file drives everything — see [docs/wikid.example.toml](docs/wikid.example.toml) for the annotated version. Discovery order: `--config` flag → `$WIKID_CONFIG` → `./wikid.toml` → `~/.config/wikid/config.toml`.
+
+You don't have to write it by hand: both `wikid init` and `wikid serve` bootstrap it. Each creates the config file if none exists (at `~/.config/wikid/config.toml`, or wherever `--config`/`$WIKID_CONFIG` points), registers the wiki directory under a name, and generates an admin token. The token value is never printed during bootstrap — reveal it explicitly with `wikid token show admin`. Editing the file manually works just as well:
 
 ```toml
 # Address the daemon listens on (default 127.0.0.1:7448).
