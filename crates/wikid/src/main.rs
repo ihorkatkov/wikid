@@ -197,10 +197,13 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 	};
 	let explicit_dir = cli.dir;
 	let explicit_server = cli.server;
-	let explicit_remote = explicit_server.is_some() || cli.token.is_some() || cli.wiki.is_some();
-	let dir = explicit_dir.or_else(|| (!explicit_remote).then(|| env_var("WIKID_DIR")).flatten());
-	let server = explicit_server.or_else(|| dir.is_none().then(|| env_var("WIKID_SERVER")).flatten());
-	if dir.is_some() && server.is_some() {
+	let explicit_token = cli.token;
+	let explicit_wiki = cli.wiki;
+	let env_dir = env_var("WIKID_DIR");
+	let env_server = env_var("WIKID_SERVER");
+	let has_explicit_local = explicit_dir.is_some();
+	let has_explicit_remote = explicit_server.is_some() || explicit_token.is_some() || explicit_wiki.is_some();
+	if !has_explicit_local && !has_explicit_remote && env_dir.is_some() && env_server.is_some() {
 		// Flag-vs-flag conflicts are caught by clap itself; this covers env-only
 		// local+remote targeting. Explicit flags win over opposite-mode env vars.
 		Cli::command()
@@ -210,10 +213,14 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 			)
 			.exit();
 	}
+	let dir = explicit_dir.or_else(|| (!has_explicit_remote).then_some(env_dir).flatten());
+	let server = explicit_server.or_else(|| (!has_explicit_local).then_some(env_server).flatten());
+	if has_explicit_remote && server.is_none() {
+		return Err(CliError::no_target());
+	}
 	let backend = if let Some(server) = server {
-		let token = cli.token.or_else(|| env_var("WIKID_TOKEN"));
-		let wiki = cli
-			.wiki
+		let token = explicit_token.or_else(|| env_var("WIKID_TOKEN"));
+		let wiki = explicit_wiki
 			.or_else(|| env_var("WIKID_WIKI"))
 			.ok_or_else(CliError::no_wiki)?;
 		Backend::Remote(Remote::new(&server, token, wiki))
@@ -257,6 +264,7 @@ fn run_serve(config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> 
 			tracing_subscriber::EnvFilter::try_from_default_env()
 				.unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
 		)
+		.with_writer(std::io::stderr)
 		.init();
 	let runtime = tokio::runtime::Runtime::new()
 		.map_err(|err| CliError::new("io", format!("failed to start async runtime: {err}"), None))?;

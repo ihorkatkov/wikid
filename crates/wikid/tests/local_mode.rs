@@ -4,7 +4,8 @@
 //! binary against temp vaults.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 
@@ -59,6 +60,10 @@ fn clear_env(cmd: &mut Command) {
 fn stdout_of(cmd: &mut Command) -> String {
 	let output = cmd.output().expect("run wikid");
 	String::from_utf8(output.stdout).expect("stdout is UTF-8")
+}
+
+fn free_port() -> u16 {
+	TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
 fn write_config(path: &Path, bind: &str, wikis: &[(&str, &Path)], default_wiki: Option<&str>, token: Option<&str>) {
@@ -311,6 +316,40 @@ fn dir_and_server_together_is_a_usage_error() {
 		.assert()
 		.code(1)
 		.stdout(predicate::str::starts_with("error[no_wiki]:"));
+	let mut env_only = wikid_untargeted();
+	env_only
+		.env("WIKID_DIR", vault.path())
+		.env("WIKID_SERVER", "http://localhost:7448")
+		.arg("status")
+		.assert()
+		.code(2);
+}
+
+#[test]
+fn remote_mode_without_a_server_does_not_fall_back_to_config() {
+	let config_vault = fixture_vault();
+	let cwd = TempDir::new().unwrap();
+	let config_path = cwd.path().join("wikid.toml");
+	write_config(
+		&config_path,
+		"127.0.0.1:7448",
+		&[("configured", config_vault.path())],
+		Some("configured"),
+		Some("t"),
+	);
+
+	wikid_untargeted()
+		.current_dir(cwd.path())
+		.args(["--wiki", "configured", "status"])
+		.assert()
+		.code(1)
+		.stdout(predicate::str::starts_with("error[no_target]:"));
+	wikid_untargeted()
+		.current_dir(cwd.path())
+		.args(["--token", "t", "status"])
+		.assert()
+		.code(1)
+		.stdout(predicate::str::starts_with("error[no_target]:"));
 }
 
 #[test]
@@ -639,7 +678,15 @@ fn serve_without_config_bootstraps_config_and_prints_no_token_value() {
 fn serve_json_startup_is_one_json_object() {
 	let home = TempDir::new().unwrap();
 	let cwd = TempDir::new().unwrap();
-	let config_path = home.path().join("missing/wikid.toml");
+	let config_path = home.path().join("wikid.toml");
+	let port = free_port();
+	write_config(
+		&config_path,
+		&format!("127.0.0.1:{port}"),
+		&[("configured", cwd.path())],
+		Some("configured"),
+		Some("t"),
+	);
 	let bin = assert_cmd::cargo::cargo_bin("wikid");
 	let mut child = StdCommand::new(bin)
 		.env_remove("WIKID_CONFIG")
@@ -653,14 +700,30 @@ fn serve_json_startup_is_one_json_object() {
 		.spawn()
 		.unwrap();
 	let stdout = child.stdout.take().unwrap();
+	let mut reader = BufReader::new(stdout);
 	let mut line = String::new();
-	BufReader::new(stdout).read_line(&mut line).unwrap();
-	let _ = child.kill();
-	let _ = child.wait();
+	reader.read_line(&mut line).unwrap();
 	let value: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("bad json {e}: {line}"));
-	assert_eq!(value["bootstrapped"], true);
+	assert_eq!(value["bootstrapped"], false);
 	assert_eq!(value["config_path"], config_path.display().to_string());
 	assert!(value["admin_token"].as_str().unwrap().contains("not printed"));
+	let health_url = format!("http://127.0.0.1:{port}/health");
+	let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+	while ureq::get(&health_url).call().is_err() {
+		assert!(
+			std::time::Instant::now() < deadline,
+			"wikid serve did not answer {health_url}"
+		);
+		std::thread::sleep(std::time::Duration::from_millis(25));
+	}
+	let _ = child.kill();
+	let _ = child.wait();
+	let mut remaining_stdout = String::new();
+	reader.read_to_string(&mut remaining_stdout).unwrap();
+	assert!(
+		remaining_stdout.trim().is_empty(),
+		"serve logs leaked to stdout: {remaining_stdout}"
+	);
 }
 
 // --- read commands: flags and ignore rules ---
