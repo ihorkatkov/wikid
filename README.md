@@ -7,7 +7,15 @@ Point `wikid serve` at a directory of Markdown files — an Obsidian vault works
 ## Quickstart
 
 ```sh
-cargo install --path crates/wikid
+curl -fsSL https://raw.githubusercontent.com/ihorkatkov/wikid/main/install.sh | bash
+```
+
+The installer bootstraps Rust with rustup if `cargo` is not already available.
+
+Install from this checkout:
+
+```sh
+./install.sh
 ```
 
 ### First run
