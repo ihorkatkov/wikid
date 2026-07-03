@@ -60,7 +60,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 
 ## 6. CLI
 
-**Targeting.** Local mode: `--dir <path>` or `$WIKID_DIR`. Remote mode: `--server <url>` + `--token <t>` + `--wiki <name>` or `$WIKID_SERVER`/`$WIKID_TOKEN`/`$WIKID_WIKI`. Both given → usage error. Neither → structured error explaining both options. Remote mode maps commands 1:1 onto the HTTP API and renders identically (deserializes the shared core structs).
+**Targeting.** Local mode: `--dir <path>` or `$WIKID_DIR`. Remote mode: `--server <url>` + `--token <t>` + `--wiki <name>` or `$WIKID_SERVER`/`$WIKID_TOKEN`/`$WIKID_WIKI`. Both given → usage error. Neither → structured error explaining both options. Remote mode maps commands 1:1 onto the HTTP API and renders identically (deserializes the shared core structs). `--wiki` is required in remote mode (missing → structured `no_wiki` error); `--token` is optional so auth-less loopback daemons work. HTTP error bodies re-render verbatim as the same `error[<code>]` with exit 1; connection/decode failures use the CLI-level `transport` code, unrecognized error bodies `http`. `serve` with no discoverable config → `no_config`; an unloadable config → `config`.
 
 **Output.** Human-readable compact text by default; `--json` on every command emits the core result struct as JSON (one object, stdout). Errors (both modes): stdout, exit 1, format `error[<code>]: <message>` + optional `hint: …` line; `--json` errors: `{"error":{"code","message","hint"}}`. Usage errors: clap default (exit 2).
 

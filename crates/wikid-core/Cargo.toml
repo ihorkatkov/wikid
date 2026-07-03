@@ -7,7 +7,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
+regex.workspace = true
+globset.workspace = true
+ignore.workspace = true
+tempfile.workspace = true
+humantime.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

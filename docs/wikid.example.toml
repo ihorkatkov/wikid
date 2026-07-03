@@ -1,0 +1,20 @@
+# wikid daemon configuration (`wikid serve --config <path>`).
+#
+# Discovery order when --config is omitted:
+#   $WIKID_CONFIG → ./wikid.toml → ~/.config/wikid/config.toml
+
+# Address the daemon listens on. Default: 127.0.0.1:7448.
+# Binding beyond loopback requires at least one token — auth-less serving is
+# refused off-loopback.
+bind = "127.0.0.1:7448"
+
+# Wiki name → directory of Markdown files. An existing Obsidian vault works
+# as-is. Every remote call is scoped by one of these names (`--wiki <name>`).
+[wikis]
+projects = "/home/you/wikis/projects"
+notes = "/home/you/notes"
+
+# Bearer token → actor name. Actor names appear in the request log.
+# Leave the table out entirely to serve loopback-only without auth.
+[tokens]
+"wkd_change_me" = "agent-vm-1"

@@ -26,7 +26,7 @@ wikid: a single Rust binary that exposes plain-Markdown wiki directories to remo
 
 ## Git hooks
 
-Hooks live in `.hooks/` (pre-commit runs fmt/clippy/build/test/doc with warnings as errors; commit-msg enforces conventional commits). Install once per clone: `git config core.hooksPath .hooks`. Never bypass with `--no-verify`.
+Hooks live in `.hooks/` (pre-commit runs fmt/clippy/build/test/doc with warnings as errors; commit-msg enforces conventional commits). `bd init` copies them into `.beads/hooks/` with beads integration appended and points `core.hooksPath` there — on a fresh clone run `bd init` (or `git config core.hooksPath .hooks` if not using beads). If you edit `.hooks/`, re-apply the change to the `.beads/hooks/` copy. Never bypass with `--no-verify`.
 
 ## Design authority
 

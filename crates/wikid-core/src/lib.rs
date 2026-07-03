@@ -2,7 +2,28 @@
 //!
 //! A wiki is any directory of Markdown files (Obsidian vaults included).
 //! This crate holds no state that isn't derivable from the files themselves.
+//! Every public result type derives `Serialize` and `Deserialize` — they are
+//! the wire format shared by the CLI, HTTP, and MCP surfaces.
 
+pub mod doctor;
+pub mod error;
+pub mod frontmatter;
+pub mod links;
+pub mod ops;
+mod paths;
+pub mod status;
 pub mod vault;
 
+#[cfg(test)]
+pub mod test_fixtures;
+
+pub use doctor::{Check, DoctorOptions, HealthReport, Issue, Severity, SeveritySummary};
+pub use error::WikidError;
+pub use frontmatter::Frontmatter;
+pub use links::{Link, LinkKind, LinkReport};
+pub use ops::{
+	Document, EditResult, Entry, EntryKind, GlobResult, GrepMatch, GrepOptions, GrepResult, Listing, MvResult,
+	ReadLimit, RmResult, WriteResult,
+};
+pub use status::{RecentPage, VaultStatus};
 pub use vault::Vault;
