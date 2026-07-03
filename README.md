@@ -76,6 +76,42 @@ export WIKID_DIR=~/notes
 wikid grep "auth flow"
 ```
 
+## Configuration
+
+One TOML file drives everything — see [docs/wikid.example.toml](docs/wikid.example.toml) for the annotated version. Discovery order: `--config` flag → `$WIKID_CONFIG` → `./wikid.toml` → `~/.config/wikid/config.toml`. `wikid serve` and `wikid init` bootstrap it for you, or maintain it by hand:
+
+```toml
+# Address the daemon listens on (default 127.0.0.1:7448).
+# Binding beyond loopback requires at least one token.
+bind = "127.0.0.1:7448"
+
+# Fallback wiki for zero-target local commands run outside any registered wiki.
+default_wiki = "notes"
+
+# Wiki name → directory. One daemon serves many wikis;
+# every remote call is scoped by name.
+[wikis]
+notes = "/home/you/notes"
+projects = "/home/you/wikis/projects"
+
+# Bearer token → actor name. The token string is the secret.
+# Omit the table entirely to serve loopback-only without auth.
+[tokens]
+"wkd_change_me" = "agent-vm-1"
+```
+
+On the client side, every remote setting is a flag with an env-var twin, so you can bake a connection into an agent VM's environment once:
+
+| Flag | Env var | Meaning |
+|---|---|---|
+| `--server` | `WIKID_SERVER` | Remote daemon URL |
+| `--token` | `WIKID_TOKEN` | Bearer token |
+| `--wiki` | `WIKID_WIKI` | Wiki name on the daemon |
+| `--dir` | `WIKID_DIR` | Local directory (local mode) |
+| `--config` | `WIKID_CONFIG` | Config file path |
+
+With none of these set, wikid reads config and picks the wiki containing the current directory, the only registered wiki, or `default_wiki`.
+
 ## The surface
 
 Every command works identically in local and remote mode, and every command takes `--json`:
