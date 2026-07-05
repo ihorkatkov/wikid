@@ -80,7 +80,7 @@ Default profile: `llm-wiki`. It bakes in the original LLM Wiki directory convent
 - assets: `raw/assets/**`
 - root meta pages: `SCHEMA.md`, `index.md`, `log.md`
 
-The default profile keeps authored-page findings actionable: raw extraction tags such as `[[P]]`, `[[H1]]`–`[[H6]]`, and `[[FIGCAPTION]]` are ignored inside `raw/**`; other raw-capture broken links are downgraded to low raw-source warnings; root meta pages are exempt from missing-frontmatter warnings; duplicate stems are classified by page/asset kind. `strict` reports raw structural findings without those LLM-wiki suppressions. Markdown links with root-relative URL destinations (`/docs/...`, `/smolvm/...`) are treated as external navigation rather than local vault links.
+The default profile keeps authored-page findings actionable by linting authored pages plus root meta/navigation pages only. Non-authored notes (`raw/**`, `raw/assets/**`, generated exports, source captures, and other non-authored subtrees) are excluded from default linting. Root meta pages are exempt from missing-frontmatter warnings; duplicate stems are classified by page/asset kind when they involve an authored/root page. `strict` reports raw structural findings across the full vault without those LLM-wiki scope rules. Markdown links with root-relative URL destinations (`/docs/...`, `/smolvm/...`) are treated as external navigation rather than local vault links.
 
 Output: issue list with severity, path, description, suggested action (as in v0.1 §10.6), grouped for humans into authored-page, raw-source, asset-hygiene, graph/navigation, and size/performance buckets. Contradiction detection, missing-source detection: deferred to the thinking layer.
 

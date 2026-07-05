@@ -253,6 +253,7 @@ impl HealthReport {
 }
 
 /// Everything doctor needs to know about one page, gathered in a single read.
+#[derive(Clone)]
 struct PageScan {
 	rel: String,
 	frontmatter: Frontmatter,
@@ -298,17 +299,27 @@ impl Vault {
 			Some(filter) => Check::ALL.iter().copied().filter(|c| filter.contains(c)).collect(),
 			None => Check::ALL.to_vec(),
 		};
+		let use_llm_scope = opts.profile == DoctorProfile::LlmWiki && has_llm_wiki_layout(&pages);
+		let scoped_pages: Vec<PageScan> = if use_llm_scope {
+			pages
+				.iter()
+				.filter(|page| is_llm_wiki_linted_page(&page.rel))
+				.cloned()
+				.collect()
+		} else {
+			pages.clone()
+		};
 		let mut issues = Vec::new();
 		for check in &enabled {
 			let mut found = match check {
-				Check::BrokenLinks => broken_links(&pages, opts.profile),
-				Check::AmbiguousLinks => ambiguous_links(&pages),
-				Check::OrphanPages => orphan_pages(&pages),
-				Check::MissingFrontmatter => missing_frontmatter(&pages, opts.profile),
-				Check::MalformedFrontmatter => malformed_frontmatter(&pages),
-				Check::StalePages => stale_pages(&pages, opts.stale_days),
-				Check::OversizedPages => oversized_pages(&pages),
-				Check::DuplicateStems => duplicate_stems(&files, opts.profile),
+				Check::BrokenLinks => broken_links(&scoped_pages, opts.profile),
+				Check::AmbiguousLinks => ambiguous_links(&scoped_pages),
+				Check::OrphanPages => orphan_pages(&scoped_pages),
+				Check::MissingFrontmatter => missing_frontmatter(&scoped_pages, opts.profile),
+				Check::MalformedFrontmatter => malformed_frontmatter(&scoped_pages),
+				Check::StalePages => stale_pages(&scoped_pages, opts.stale_days),
+				Check::OversizedPages => oversized_pages(&scoped_pages),
+				Check::DuplicateStems => duplicate_stems(&files, opts.profile, use_llm_scope),
 			};
 			found.sort_by(|a, b| a.path.cmp(&b.path));
 			issues.extend(found);
@@ -317,7 +328,7 @@ impl Vault {
 		for issue in &issues {
 			*counts.get_mut(issue.check.name()).expect("issue from enabled check") += 1;
 		}
-		let summary = summarize(&issues, pages.len());
+		let summary = summarize(&issues, scoped_pages.len());
 		Ok(HealthReport {
 			issues,
 			counts,
@@ -373,6 +384,16 @@ fn is_root_meta_page(path: &str) -> bool {
 		&& (path.eq_ignore_ascii_case("SCHEMA.md")
 			|| path.eq_ignore_ascii_case("index.md")
 			|| path.eq_ignore_ascii_case("log.md"))
+}
+
+fn has_llm_wiki_layout(pages: &[PageScan]) -> bool {
+	pages
+		.iter()
+		.any(|page| is_authored_page(&page.rel) || is_raw_path(&page.rel))
+}
+
+fn is_llm_wiki_linted_page(path: &str) -> bool {
+	is_authored_page(path) || is_root_meta_page(path)
 }
 
 fn is_authored_page(path: &str) -> bool {
@@ -570,7 +591,7 @@ fn oversized_pages(pages: &[PageScan]) -> Vec<Issue> {
 		.collect()
 }
 
-fn duplicate_stems(files: &[(String, PathBuf)], profile: DoctorProfile) -> Vec<Issue> {
+fn duplicate_stems(files: &[(String, PathBuf)], profile: DoctorProfile, use_llm_scope: bool) -> Vec<Issue> {
 	let mut by_stem: BTreeMap<String, Vec<&str>> = BTreeMap::new();
 	for (rel, _) in files {
 		let name = rel.rsplit('/').next().unwrap_or(rel);
@@ -583,13 +604,22 @@ fn duplicate_stems(files: &[(String, PathBuf)], profile: DoctorProfile) -> Vec<I
 		.filter_map(|(stem, mut paths)| {
 			paths.sort_unstable();
 			let page_count = paths.iter().filter(|path| is_page(path)).count();
+			let scoped_pages: Vec<&str> = paths
+				.iter()
+				.copied()
+				.filter(|path| is_page(path) && (!use_llm_scope || is_llm_wiki_linted_page(path)))
+				.collect();
+			if matches!(profile, DoctorProfile::LlmWiki) && scoped_pages.is_empty() {
+				return None;
+			}
+			let scoped_page_count = if use_llm_scope { scoped_pages.len() } else { page_count };
 			let severity = match profile {
 				DoctorProfile::Strict => Severity::Medium,
-				DoctorProfile::LlmWiki if page_count >= 2 => Severity::Medium,
-				DoctorProfile::LlmWiki if page_count == 1 => Severity::Low,
+				DoctorProfile::LlmWiki if scoped_page_count >= 2 => Severity::Medium,
+				DoctorProfile::LlmWiki if scoped_page_count == 1 => Severity::Low,
 				DoctorProfile::LlmWiki => return None,
 			};
-			let action = if page_count >= 2 {
+			let action = if scoped_page_count >= 2 {
 				"rename one page so wikilink stems stay unique"
 			} else {
 				"rename assets only if the shared stem is confusing"
@@ -597,7 +627,7 @@ fn duplicate_stems(files: &[(String, PathBuf)], profile: DoctorProfile) -> Vec<I
 			Some(issue_with_severity(
 				Check::DuplicateStems,
 				severity,
-				paths[0],
+				scoped_pages.first().copied().unwrap_or(paths[0]),
 				format!("stem '{stem}' is shared by {}", paths.join(", ")),
 				action,
 			))
