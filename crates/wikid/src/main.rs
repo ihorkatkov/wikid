@@ -122,10 +122,12 @@ enum Command {
 		/// Hash of the line as last read (refused if the line changed since)
 		#[arg(long, value_name = "HASH")]
 		hash: String,
-		/// Replacement text; may contain newlines to expand into several lines
+		/// Replacement text; may contain newlines to expand into several lines; use --new=-x for leading '-'
 		#[arg(long, value_name = "TEXT")]
 		new: String,
 	},
+	/// Replace multiple hash-addressed lines from a JSON array on stdin
+	EditBatch { path: String },
 	/// Rename or move a page
 	Mv {
 		from: String,
@@ -677,8 +679,9 @@ This directory is a blank LLM Wiki: a plain-Markdown knowledge base maintained b
 - `wikid links <path>` shows outgoing links and backlinks.
 - `wikid doctor` checks structural health.
 - `wikid serve` exposes registered wikis over HTTP.
+- `wikid edit-batch <path>` reads a JSON array of hash-guarded line edits from stdin for multiple safe replacements in one file.
 
-Paths are wiki-root-relative, even when the shell cwd is inside a subdirectory of the wiki.
+Paths are wiki-root-relative, even when the shell cwd is inside a subdirectory of the wiki. In remote mode, `status` shows `root (server): ...`; that path belongs to the machine running `wikid serve`, not the client shell.
 "#;
 
 /// The targeted wiki: a local directory or a remote daemon. Both expose the
@@ -793,7 +796,9 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 		Command::Serve | Command::Init { .. } | Command::Token { .. } => unreachable!("handled in run()"),
 		Command::Status => {
 			let status = backend.status()?;
-			Ok(Outcome::ok(emit(json, &status, || render::status(&status))))
+			Ok(Outcome::ok(emit(json, &status, || {
+				render::status(&status, matches!(backend, Backend::Remote(_)))
+			})))
 		}
 		Command::Ls { path } => {
 			let listing = backend.ls(path.as_deref(), 1)?;
@@ -853,6 +858,11 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 			let result = backend.edit(&path, &edits)?;
 			Ok(Outcome::ok(emit(json, &result, || render::edit(&result))))
 		}
+		Command::EditBatch { path } => {
+			let edits = read_edit_batch()?;
+			let result = backend.edit(&path, &edits)?;
+			Ok(Outcome::ok(emit(json, &result, || render::edit(&result))))
+		}
 		Command::Mv { from, to, force } => {
 			let result = backend.mv(&from, &to, force)?;
 			Ok(Outcome::ok(emit(json, &result, || render::mv(&result))))
@@ -897,6 +907,17 @@ fn read_stdin() -> Result<String, CliError> {
 		.read_to_string(&mut content)
 		.map_err(|e| CliError::new("io", format!("failed to read content from stdin: {e}"), None))?;
 	Ok(content)
+}
+
+fn read_edit_batch() -> Result<Vec<LineEdit>, CliError> {
+	let input = read_stdin()?;
+	serde_json::from_str::<Vec<LineEdit>>(&input).map_err(|err| {
+		CliError::new(
+			"bad_edit",
+			format!("edit-batch stdin must be a JSON array of line edits: {err}"),
+			Some("example: [{\"line\":1,\"expected_hash\":\"abc123\",\"new_text\":\"replacement\"}]".to_owned()),
+		)
+	})
 }
 
 /// Parses the `--checks a,b,c` filter; unknown names surface the core

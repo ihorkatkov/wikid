@@ -257,6 +257,19 @@ fn json_output_parses_for_every_command() {
 		"edit", "new.md", "--line", "1", "--hash", &hash, "--new", "stale", "--json",
 	]));
 	assert_eq!(edit["replacements"], 1);
+	let hashes = json_of(wikid(vault.path()).args(["cat", "new.md", "--hashes", "--json"]));
+	let hash = hashes["lines"][0]["hash"].as_str().unwrap().to_owned();
+	let mut batch = wikid(vault.path());
+	let batch_output = batch
+		.args(["edit-batch", "new.md", "--json"])
+		.write_stdin(format!(
+			"[{{\"line\":1,\"expected_hash\":{hash:?},\"new_text\":\"batched\"}}]"
+		))
+		.output()
+		.unwrap();
+	assert_eq!(batch_output.status.code(), Some(0));
+	let batch: serde_json::Value = serde_json::from_slice(&batch_output.stdout).unwrap();
+	assert_eq!(batch["replacements"], 1);
 	let mv = json_of(wikid(vault.path()).args(["mv", "new.md", "old.md", "--json"]));
 	assert_eq!(mv["from"], "new.md");
 	assert_eq!(mv["to"], "old.md");
@@ -268,6 +281,21 @@ fn json_output_parses_for_every_command() {
 	let doctor = json_of(wikid(vault.path()).args(["doctor", "--json"]));
 	assert!(doctor["issues"].is_array());
 	assert!(doctor["summary"].is_string());
+}
+
+#[test]
+fn doctor_shows_yaml_parser_details_for_malformed_frontmatter() {
+	let vault = TempDir::new().unwrap();
+	fs::write(vault.path().join("bad.md"), "---\ntitle: [unterminated\n---\n# Bad\n").unwrap();
+	let out = stdout_of(wikid(vault.path()).args(["doctor", "--checks", "malformed_frontmatter"]));
+	assert!(out.contains("frontmatter block is not valid YAML:"), "{out}");
+	assert!(out.contains("line"), "{out}");
+	assert!(out.contains("column"), "{out}");
+	let json = json_of(wikid(vault.path()).args(["doctor", "--checks", "malformed_frontmatter", "--json"]));
+	let detail = json["issues"][0]["detail"].as_str().unwrap();
+	assert!(detail.contains("frontmatter block is not valid YAML:"), "{detail}");
+	assert!(detail.contains("line"), "{detail}");
+	assert!(detail.contains("column"), "{detail}");
 }
 
 #[test]
@@ -907,9 +935,10 @@ fn cat_hashes_lists_line_number_hash_and_text_with_the_edit_hint() {
 	let hash = wikid_core::hash_line("The needle is here.");
 	assert!(out.contains(&format!("3:{hash}: The needle is here.")), "{out}");
 	assert!(
-		out.contains("hint: wikid edit notes/alpha.md --line <n> --hash <hash> --new <text>"),
+		out.contains("hint: wikid edit notes/alpha.md --line <n> --hash <hash> --new=<text>"),
 		"{out}"
 	);
+	assert!(out.contains("hint: wikid edit-batch notes/alpha.md"), "{out}");
 }
 
 #[test]
@@ -951,6 +980,56 @@ fn edit_replaces_a_hash_addressed_line_and_rejects_stale_or_bad_targets() {
 		.code(1)
 		.stdout(predicate::str::starts_with("error[bad_edit]:"))
 		.stdout(predicate::str::contains("cat notes/alpha.md"));
+}
+
+#[test]
+fn edit_accepts_leading_dash_values_with_equals_form() {
+	let vault = fixture_vault();
+	let hash = wikid_core::hash_line("The needle is here.");
+	wikid(vault.path())
+		.args([
+			"edit",
+			"notes/alpha.md",
+			"--line",
+			"3",
+			"--hash",
+			&hash,
+			"--new=- bullet item",
+		])
+		.assert()
+		.success();
+	let content = fs::read_to_string(vault.path().join("notes/alpha.md")).unwrap();
+	assert!(content.contains("- bullet item"));
+}
+
+#[test]
+fn edit_batch_replaces_multiple_hash_guarded_lines_from_json_stdin() {
+	let vault = fixture_vault();
+	let first = wikid_core::hash_line("The needle is here.");
+	let second = wikid_core::hash_line("Another needle line.");
+	wikid(vault.path())
+		.args(["edit-batch", "notes/alpha.md"])
+		.write_stdin(format!(
+			"[{{\"line\":3,\"expected_hash\":{first:?},\"new_text\":\"first replacement\"}},{{\"line\":4,\"expected_hash\":{second:?},\"new_text\":\"second replacement\"}}]"
+		))
+		.assert()
+		.success()
+		.stdout(predicate::str::contains("edited notes/alpha.md: 2 lines replaced"));
+	let content = fs::read_to_string(vault.path().join("notes/alpha.md")).unwrap();
+	assert!(content.contains("first replacement"));
+	assert!(content.contains("second replacement"));
+}
+
+#[test]
+fn edit_batch_rejects_invalid_json_as_structured_bad_edit() {
+	let vault = fixture_vault();
+	wikid(vault.path())
+		.args(["edit-batch", "notes/alpha.md"])
+		.write_stdin("not json")
+		.assert()
+		.code(1)
+		.stdout(predicate::str::starts_with("error[bad_edit]:"))
+		.stdout(predicate::str::contains("JSON array"));
 }
 
 #[test]

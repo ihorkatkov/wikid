@@ -212,9 +212,22 @@ fn remote_mode_matches_local_mode_end_to_end() {
 	let server = spawn_server(vault.path());
 	let base = server.base.as_str();
 
-	// Read commands: identical rendering, totals, hints, and exit codes.
+	let (local_status, local_code) = local(vault.path(), &["status"]);
+	let (remote_status, remote_code) = remote(base, &["status"]);
+	assert_eq!(remote_code, local_code, "status exit code parity");
+	assert!(local_status.contains("\nroot: "), "{local_status}");
+	assert!(remote_status.contains("\nroot (server): "), "{remote_status}");
+	assert_eq!(
+		remote_status.replace("root (server):", "root:"),
+		local_status,
+		"remote status differs only by server-side root label"
+	);
+	let (local_status_json, _) = local(vault.path(), &["status", "--json"]);
+	let (remote_status_json, _) = remote(base, &["status", "--json"]);
+	assert_eq!(remote_status_json, local_status_json, "status --json parity");
+
+	// Other read commands: identical rendering, totals, hints, and exit codes.
 	let read_commands: &[&[&str]] = &[
-		&["status"],
 		&["ls"],
 		&["ls", "notes"],
 		&["tree"],
@@ -280,6 +293,52 @@ fn remote_mode_matches_local_mode_end_to_end() {
 	);
 	assert_eq!(code, 0);
 	assert_eq!(remote_edit, local_edit, "edit parity");
+
+	// edit-batch: JSON-stdin batches go through the same HTTP edit endpoint.
+	let alpha_hash = wikid_core::hash_line("# Alpha");
+	let needle_hash = wikid_core::hash_line("The needle is here.");
+	let batch_json = format!(
+		"[{{\"line\":1,\"expected_hash\":{alpha_hash:?},\"new_text\":\"# Alpha Remote\"}},{{\"line\":3,\"expected_hash\":{needle_hash:?},\"new_text\":\"The needle is remote.\"}}]"
+	);
+	let mut remote_batch = Command::cargo_bin("wikid").expect("binary builds");
+	clear_env(&mut remote_batch);
+	let output = remote_batch
+		.args([
+			"--server",
+			base,
+			"--token",
+			TOKEN,
+			"--wiki",
+			WIKI,
+			"edit-batch",
+			"notes/alpha.md",
+		])
+		.write_stdin(batch_json)
+		.output()
+		.unwrap();
+	assert_eq!(output.status.code(), Some(0));
+	let remote_batch_out = String::from_utf8(output.stdout).unwrap();
+	assert!(remote_batch_out.contains("edited notes/alpha.md: 2 lines replaced"));
+	assert!(
+		fs::read_to_string(vault.path().join("notes/alpha.md"))
+			.unwrap()
+			.contains("# Alpha Remote")
+	);
+	// Restore for later checks.
+	let alpha_remote_hash = wikid_core::hash_line("# Alpha Remote");
+	let needle_remote_hash = wikid_core::hash_line("The needle is remote.");
+	let restore_json = format!(
+		"[{{\"line\":1,\"expected_hash\":{alpha_remote_hash:?},\"new_text\":\"# Alpha\"}},{{\"line\":3,\"expected_hash\":{needle_remote_hash:?},\"new_text\":\"The needle is here.\"}}]"
+	);
+	let mut restore = Command::cargo_bin("wikid").expect("binary builds");
+	clear_env(&mut restore);
+	restore
+		.args(["--dir"])
+		.arg(vault.path())
+		.args(["edit-batch", "notes/alpha.md"])
+		.write_stdin(restore_json)
+		.assert()
+		.success();
 
 	// mv: a remote move renders exactly like the same local move. Restore the
 	// file between invocations so both runs move the same source to the same
@@ -354,7 +413,7 @@ fn remote_mode_matches_local_mode_end_to_end() {
 }
 
 /// Remote targeting purely via `WIKID_SERVER`/`WIKID_TOKEN`/`WIKID_WIKI` env
-/// vars — no flags — reaches the daemon and renders exactly like local mode.
+/// vars — no flags — reaches the daemon and labels `root` as server-side.
 #[test]
 fn env_vars_alone_target_the_remote_daemon() {
 	let vault = fixture_vault();
@@ -372,7 +431,11 @@ fn env_vars_alone_target_the_remote_daemon() {
 	assert_eq!(output.status.code(), Some(0), "env-var targeting must reach the daemon");
 	let remote_out = String::from_utf8(output.stdout).unwrap();
 	let (local_out, _) = local(vault.path(), &["status"]);
-	assert_eq!(remote_out, local_out, "env-var remote status matches local");
+	assert_eq!(
+		remote_out.replace("root (server):", "root:"),
+		local_out,
+		"env-var remote status matches local except server-side root label"
+	);
 }
 
 #[test]

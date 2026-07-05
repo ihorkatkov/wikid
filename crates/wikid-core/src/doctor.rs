@@ -389,14 +389,14 @@ fn missing_frontmatter(pages: &[PageScan]) -> Vec<Issue> {
 fn malformed_frontmatter(pages: &[PageScan]) -> Vec<Issue> {
 	pages
 		.iter()
-		.filter(|page| page.frontmatter.is_malformed())
-		.map(|page| {
-			issue(
+		.filter_map(|page| {
+			let detail = page.frontmatter.malformed_detail()?;
+			Some(issue(
 				Check::MalformedFrontmatter,
 				&page.rel,
-				"frontmatter block is not valid YAML".to_string(),
+				format!("frontmatter block is not valid YAML: {detail}"),
 				"fix the YAML between the --- markers or remove the block",
-			)
+			))
 		})
 		.collect()
 }

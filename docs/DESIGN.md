@@ -29,7 +29,7 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 | `grep(pattern, opts)` | Regex search (`regex` crate) over pages + UTF-8 text files. Options: `ignore_case`, `files_only`, `context` (lines), `limit` (default 50 matches). Result: `matches: [{path, line, text}]` (+ `context_before/after` when requested), `total_matches`, `matched_files` (files with ≥1 match), `total_files` (files searched), `truncated`. Files whose path stem matches the pattern are ranked first. |
 | `glob(pattern)` | `globset` match over relative paths, e.g. `**/*.md`. Sorted by path. Returns entries + `total`. |
 | `write(path, content)` | Create or overwrite. Creates parent dirs. **Atomic**: `tempfile::NamedTempFile::new_in(parent)` + `persist`. Returns `{path, created: bool, bytes}`. |
-| `edit(path, edits: &[LineEdit])` | Hash-guarded line replacement (`LineEdit { line, expected_hash, new_text }`, 1-based lines). Structural problems (empty batch, out-of-range line, duplicate line) → `BadEdit`. Every `expected_hash` must match the current line's hash (comparison is ASCII-case-insensitive); any mismatch → `StaleEdit` naming every stale line, and the whole batch is refused — all-or-nothing. `new_text` may contain `\n` (one line expands into many). EOL style (LF/CRLF) and trailing-newline presence are preserved. Write is atomic as above; returns `{path, replacements, bytes}` where `replacements` counts lines replaced. |
+| `edit(path, edits: &[LineEdit])` | Hash-guarded line replacement (`LineEdit { line, expected_hash, new_text }`, 1-based lines). Structural problems (empty batch, out-of-range line, duplicate line) → `BadEdit`. Every `expected_hash` must match the current line's hash (comparison is ASCII-case-insensitive); any mismatch → `StaleEdit` naming every stale line, and the whole batch is refused — all-or-nothing. `new_text` may contain `\n` (one line expands into many). EOL style (LF/CRLF) and trailing-newline presence are preserved. Write is atomic as above; returns `{path, replacements, bytes}` where `replacements` counts lines replaced. CLI exposes single-line `edit` and JSON-stdin `edit-batch`; both call this same method. |
 | `mv(from, to, force)` | Rename file (not dirs). Creates parent dirs at destination. Destination exists and `!force` → `AlreadyExists`. |
 | `rm(path)` | Delete file (not dirs). The `--force` gate is CLI/HTTP-level, not core. |
 | `links(path)` | `LinkReport { outgoing: [{raw, target, resolved: Option<path>, kind: wikilink/markdown}], backlinks: [path] }`. Backlinks = scan all pages for links resolving to `path`. |
@@ -42,7 +42,7 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 
 - Extract `[[Target]]`, `[[Target|alias]]`, `[[Target#Heading]]` (heading part ignored for resolution) and markdown links `[text](relative/path.md)` (skip `http(s)://`, `mailto:`, anchors).
 - Resolution, in order: (1) exact relative path from root (with/without `.md`); (2) unique file-stem match anywhere in the vault (case-insensitive); (3) unique path-suffix match (`folder/Note`). Multiple stem candidates → unresolved + flagged `ambiguous` (doctor reports it). No match → broken link.
-- Frontmatter: leading `---\n…\n---` block parsed with `serde_yaml` into a string-keyed map. Absence is normal. Malformed YAML → treated as no frontmatter, doctor flags it.
+- Frontmatter: leading `---\n…\n---` block parsed with `serde_yaml` into a string-keyed map. Absence is normal. Malformed YAML → treated as no frontmatter; doctor flags it and includes the `serde_yaml` parser/type error string in the issue detail.
 - Page title: frontmatter `title` → first `# heading` → file stem.
 
 ## 5. Core: doctor checks
@@ -55,7 +55,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 | `ambiguous_links` | stem matches >1 file | medium |
 | `orphan_pages` | page with no inbound links, excluding root-level `index.md`/`README.md` | low |
 | `missing_frontmatter` | only when ≥50% of pages have frontmatter (the vault "uses" it) — pages without it | low |
-| `malformed_frontmatter` | `---` block present but YAML parse fails | medium |
+| `malformed_frontmatter` | `---` block present but YAML parse/type-check fails; issue detail includes the YAML parser/type error string | medium |
 | `stale_pages` | mtime older than `stale_days` (default 90) | low |
 | `oversized_pages` | > 64 KiB or > 1500 lines | medium |
 | `duplicate_stems` | same case-insensitive stem at multiple paths (breaks wikilink resolution) | medium |
@@ -85,7 +85,8 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 - `grep <pattern>` `-i` `-l` `-C <n>` `--limit <n>`
 - `glob <pattern>`
 - `write <path>` (content from stdin; `-m <text>` for one-liners)
-- `edit <path> --line <n> --hash <h> --new <s>` (single line edit per invocation; batches exist at the core/HTTP level only)
+- `edit <path> --line <n> --hash <h> --new=<s>` (single line edit; use the `=` form when `<s>` starts with `-`)
+- `edit-batch <path>` (reads JSON array of `{line, expected_hash, new_text}` from stdin; all-or-nothing through the same hash-guarded core edit)
 - `mv <from> <to>` `--force`
 - `rm <path> --force`
 - `links <path>`
@@ -96,7 +97,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 
 - `GET /health` — unauthenticated `{"status":"ok"}`.
 - Everything else requires `Authorization: Bearer <token>`; unknown token → 401 `{"error":{"code":"unauthorized",…}}`.
-- Routes (all under a named wiki; unknown wiki → 404 `unknown_wiki` listing available names):
+- Routes (all under a named wiki; unknown wiki → 404 `unknown_wiki` listing available names). In remote mode, `status.root` is the server-side filesystem path; it is not a path the client machine can read directly. Human CLI rendering labels it `root (server): …`, while `--json` preserves the shared `VaultStatus` struct unchanged:
   - `GET  /v1/wikis` → `{wikis:[{name, pages}]}`
   - `GET  /v1/wikis/{wiki}/status`
   - `GET  /v1/wikis/{wiki}/ls?path=&depth=`

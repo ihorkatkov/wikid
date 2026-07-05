@@ -38,15 +38,16 @@ fn severity_name(severity: Severity) -> &'static str {
 	}
 }
 
-pub fn status(status: &VaultStatus) -> String {
+pub fn status(status: &VaultStatus, remote: bool) -> String {
 	let wiki_name = status
 		.root
 		.rsplit(['/', '\\'])
 		.find(|part| !part.is_empty())
 		.unwrap_or("selected");
+	let root_label = if remote { "root (server)" } else { "root" };
 	let mut lines = vec![
 		format!("wiki: {wiki_name}"),
-		format!("root: {}", status.root),
+		format!("{root_label}: {}", status.root),
 		format!(
 			"pages: {}  files: {}  size: {}",
 			status.total_pages,
@@ -195,7 +196,11 @@ pub fn hashlines(result: &HashlinesResult) -> String {
 		));
 	}
 	lines.push(format!(
-		"hint: wikid edit {} --line <n> --hash <hash> --new <text> — replace a line",
+		"hint: wikid edit {} --line <n> --hash <hash> --new=<text> — replace a line",
+		result.path
+	));
+	lines.push(format!(
+		"hint: wikid edit-batch {} — replace multiple hashed lines from JSON stdin",
 		result.path
 	));
 	lines.join("\n")
@@ -406,7 +411,11 @@ mod tests {
 			"{out}"
 		);
 		assert!(
-			out.ends_with("hint: wikid edit a.md --line <n> --hash <hash> --new <text> — replace a line"),
+			out.contains("hint: wikid edit a.md --line <n> --hash <hash> --new=<text> — replace a line"),
+			"{out}"
+		);
+		assert!(
+			out.ends_with("hint: wikid edit-batch a.md — replace multiple hashed lines from JSON stdin"),
 			"{out}"
 		);
 	}

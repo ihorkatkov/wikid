@@ -1,6 +1,6 @@
 //! YAML frontmatter (DESIGN §4): a leading `---` block parsed into a
 //! string-keyed map. Absence is normal; malformed YAML degrades to "no
-//! frontmatter" while staying detectable so doctor can flag it.
+//! frontmatter" while preserving parser details so doctor can flag it.
 
 use std::collections::BTreeMap;
 
@@ -12,8 +12,8 @@ pub enum Frontmatter {
 	/// No leading `---` block — the normal case for plain Markdown.
 	Absent,
 	/// A `---` block is present but is not a string-keyed YAML map.
-	/// Consumers treat this as no frontmatter; doctor flags it.
-	Malformed,
+	/// Consumers treat this as no frontmatter; doctor flags it with detail.
+	Malformed(String),
 	/// A well-formed block: the parsed string-keyed map.
 	Present(BTreeMap<String, serde_yaml::Value>),
 }
@@ -21,7 +21,15 @@ pub enum Frontmatter {
 impl Frontmatter {
 	/// True when a block was present but unparseable.
 	pub fn is_malformed(&self) -> bool {
-		matches!(self, Self::Malformed)
+		matches!(self, Self::Malformed(_))
+	}
+
+	/// Parser/type error detail for a malformed block.
+	pub fn malformed_detail(&self) -> Option<&str> {
+		match self {
+			Self::Malformed(detail) => Some(detail),
+			_ => None,
+		}
 	}
 }
 
@@ -80,7 +88,7 @@ fn parse_block(block: &str) -> Frontmatter {
 	}
 	match serde_yaml::from_str::<BTreeMap<String, serde_yaml::Value>>(block) {
 		Ok(map) => Frontmatter::Present(map),
-		Err(_) => Frontmatter::Malformed,
+		Err(err) => Frontmatter::Malformed(err.to_string()),
 	}
 }
 

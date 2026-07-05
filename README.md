@@ -63,7 +63,12 @@ wikid grep "auth flow"
 wikid cat architecture.md
 wikid cat decisions.md --hashes            # each line as line:hash: text
 wikid edit decisions.md --line 4 --hash 3b39a78cfdcb --new "status: final"
+wikid edit decisions.md --line 5 --hash 9a1b2c3d4e5f --new="- status starts with dash"
+printf '%s' '[{"line":4,"expected_hash":"3b39a78cfdcb","new_text":"status: final"}]' \
+  | wikid edit-batch decisions.md
 ```
+
+In remote mode, `status` labels the root as `root (server): ...`. That path lives on the machine running `wikid serve`; use `wikid cat`/`grep`/`edit` from the client, not local shell file commands against that path.
 
 (`--server`, `--token`, and `--wiki` flags work too. Network exposure is your choice: localhost, tailscale, or public + TLS.)
 
@@ -125,7 +130,7 @@ Every command works identically in local and remote mode, and every command take
 | `ls` / `tree` / `glob` | Find pages by path |
 | `cat` | Read a page (large files truncated with a size hint; `--full` to override) |
 | `grep` | Regex search with ranked results and match context |
-| `write` / `edit` | Create pages; hash-guarded line edits — a stale hash refuses the edit, so concurrent writers never silently clobber each other |
+| `write` / `edit` / `edit-batch` | Create pages; hash-guarded line edits — a stale hash refuses the whole edit batch, so concurrent writers never silently clobber each other |
 | `mv` / `rm` | Rename and delete (`rm` requires `--force` — never an interactive prompt) |
 | `links` | Outgoing links and backlinks from the wikilink graph |
 | `doctor` | Structural health checks: broken wikilinks, orphans, stale and oversized pages |
@@ -159,7 +164,7 @@ wikid --dir examples/llm-wiki doctor
 - **Your substrate owns history.** Versioning, backup, and undo belong to git, Dropbox, or whatever holds the directory — wikid never touches them. Writes are atomic, last-write-wins.
 - **Obsidian-compatible by construction.** YAML frontmatter, `[[wikilinks]]` with aliases, `.obsidian/` ignored. Every feature degrades gracefully when a convention isn't used.
 - **Named bearer tokens** for auth. One TOML config: wikis, tokens, bind address.
-- **One operation core.** CLI, HTTP, and (next) MCP are thin views over the same operations in `wikid-core` — same behavior, same output, everywhere.
+- **One operation core.** CLI, HTTP, and (next) MCP are thin views over the same operations in `wikid-core` — same behavior and shared JSON wire structs everywhere. Human remote `status` labels `root` as server-side so agents do not mistake it for a local path.
 
 Full spec: [docs/SPEC.md](docs/SPEC.md) · implementation blueprint: [docs/DESIGN.md](docs/DESIGN.md)
 
