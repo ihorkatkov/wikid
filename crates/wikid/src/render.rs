@@ -39,8 +39,14 @@ fn severity_name(severity: Severity) -> &'static str {
 }
 
 pub fn status(status: &VaultStatus) -> String {
+	let wiki_name = status
+		.root
+		.rsplit(['/', '\\'])
+		.find(|part| !part.is_empty())
+		.unwrap_or("selected");
 	let mut lines = vec![
-		format!("vault: {}", status.root),
+		format!("wiki: {wiki_name}"),
+		format!("root: {}", status.root),
 		format!(
 			"pages: {}  files: {}  size: {}",
 			status.total_pages,
@@ -48,19 +54,19 @@ pub fn status(status: &VaultStatus) -> String {
 			human_size(status.total_bytes)
 		),
 	];
+	let health = &status.doctor_summary;
+	lines.push(format!(
+		"health: {} high  {} medium  {} low",
+		health.high, health.medium, health.low
+	));
 	if !status.recent.is_empty() {
 		lines.push("recent:".to_string());
 		for page in &status.recent {
-			lines.push(format!("  {}  {}", page.path, page.modified));
+			lines.push(format!("  {}  {}", page.modified, page.path));
 		}
 	}
-	let health = &status.doctor_summary;
-	lines.push(format!(
-		"health: {} high, {} medium, {} low",
-		health.high, health.medium, health.low
-	));
-	lines.push("hint: wikid ls <path> — list a directory".to_string());
-	lines.push("hint: wikid doctor — full health report".to_string());
+	lines.push("hint: wikid grep <pattern> — search this wiki".to_string());
+	lines.push("hint: wikid doctor — inspect structural issues".to_string());
 	lines.join("\n")
 }
 

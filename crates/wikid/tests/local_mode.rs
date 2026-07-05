@@ -97,7 +97,8 @@ fn axi_1_no_args_is_live_status_not_help() {
 	cmd.env("WIKID_DIR", vault.path());
 	cmd.assert()
 		.success()
-		.stdout(predicate::str::contains("vault:"))
+		.stdout(predicate::str::contains("wiki:"))
+		.stdout(predicate::str::contains("root:"))
 		.stdout(predicate::str::contains("pages: 4"))
 		.stdout(predicate::str::contains("Usage").not());
 }
@@ -295,16 +296,23 @@ fn json_errors_use_the_error_object_shape() {
 // --- targeting: local dir, remote selection, serve config discovery ---
 
 #[test]
-fn no_target_is_a_structured_error() {
+fn no_target_is_a_friendly_zero_state() {
 	let home = TempDir::new().unwrap();
 	wikid_untargeted()
 		.env("HOME", home.path())
 		.arg("status")
 		.assert()
 		.code(1)
-		.stdout(predicate::str::starts_with("error[no_target]:"))
-		.stdout(predicate::str::contains("--dir"))
-		.stdout(predicate::str::contains("--server"));
+		.stdout(predicate::str::starts_with("error[no_target]: wikid: no wiki selected"))
+		.stdout(predicate::str::contains(
+			"No --dir, WIKID_DIR, remote server, or config wiki was found.",
+		))
+		.stdout(predicate::str::contains("next:"))
+		.stdout(predicate::str::contains("wikid --dir <path> status"))
+		.stdout(predicate::str::contains("wikid init <path>"))
+		.stdout(predicate::str::contains(
+			"hint: a wiki is just a directory of Markdown files",
+		));
 }
 
 #[test]

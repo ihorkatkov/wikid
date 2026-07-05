@@ -46,11 +46,15 @@ impl CliError {
 
 	/// Neither a local directory nor a remote server was targeted.
 	pub fn no_target() -> Self {
+		let cwd = std::env::current_dir()
+			.map(|path| path.display().to_string())
+			.unwrap_or_else(|_| ".".to_string());
 		Self::new(
 			"no_target",
-			"no wiki targeted: pass --dir <path> (or set $WIKID_DIR) for a local wiki, \
-			 or --server <url> --token <t> --wiki <name> (or $WIKID_SERVER/$WIKID_TOKEN/$WIKID_WIKI) for a remote one",
-			Some("wikid --dir . status — inspect the current directory as a wiki".to_string()),
+			format!(
+				"wikid: no wiki selected\n\nNo --dir, WIKID_DIR, remote server, or config wiki was found.\ncwd: {cwd}\n\nnext:\n  wikid --dir <path> status       inspect a local Markdown wiki\n  wikid init <path>               create/register a wiki scaffold\n  wikid serve                     expose configured wikis over HTTP/MCP"
+			),
+			Some("a wiki is just a directory of Markdown files".to_string()),
 		)
 	}
 
