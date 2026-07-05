@@ -90,12 +90,27 @@ pub fn document(doc: &Document) -> String {
 	if !doc.content.is_empty() {
 		lines.push(doc.content.strip_suffix('\n').unwrap_or(&doc.content).to_string());
 	}
-	if doc.truncated {
+	if let (Some(start), Some(end)) = (doc.range_start, doc.range_end) {
 		lines.push(format!(
-			"… truncated ({} lines / {} bytes total) — use --full",
+			"lines {start}-{end} of {} ({} bytes total)",
 			doc.total_lines, doc.total_bytes
 		));
-		lines.push(format!("hint: wikid cat {} --full — read the whole file", doc.path));
+		if end < doc.total_lines {
+			let next_start = end + 1;
+			let next_end = (end + (end - start + 1)).min(doc.total_lines);
+			lines.push(format!(
+				"hint: wikid cat {} --lines {next_start}-{next_end} — read the next window",
+				doc.path
+			));
+		} else {
+			lines.push(format!("hint: wikid links {} — outgoing links and backlinks", doc.path));
+		}
+	} else if doc.truncated {
+		lines.push(format!(
+			"… truncated ({} lines / {} bytes total) — use --full or --lines <START-END>",
+			doc.total_lines, doc.total_bytes
+		));
+		lines.push(format!("hint: wikid cat {} --lines 1-120 — read a window", doc.path));
 	} else {
 		lines.push(format!("hint: wikid links {} — outgoing links and backlinks", doc.path));
 	}
@@ -190,9 +205,14 @@ pub fn hashlines(result: &HashlinesResult) -> String {
 		.iter()
 		.map(|l| format!("{}:{}: {}", l.line, l.hash, l.text))
 		.collect();
-	if result.truncated {
+	if let (Some(start), Some(end)) = (result.range_start, result.range_end) {
 		lines.push(format!(
-			"… truncated ({} lines / {} bytes total) — use --full",
+			"lines {start}-{end} of {} ({} bytes total)",
+			result.total_lines, result.total_bytes
+		));
+	} else if result.truncated {
+		lines.push(format!(
+			"… truncated ({} lines / {} bytes total) — use --full or --lines <START-END>",
 			result.total_lines, result.total_bytes
 		));
 	}
@@ -330,17 +350,19 @@ mod tests {
 			path: "big.md".to_string(),
 			content: "line 1\n".to_string(),
 			truncated: true,
+			range_start: None,
+			range_end: None,
 			total_lines: 500,
 			total_bytes: 4242,
 			modified: "2026-07-02T10:00:00Z".to_string(),
 		};
 		let out = document(&doc);
 		assert!(
-			out.contains("… truncated (500 lines / 4242 bytes total) — use --full"),
+			out.contains("… truncated (500 lines / 4242 bytes total) — use --full or --lines <START-END>"),
 			"{out}"
 		);
 		assert!(
-			out.ends_with("hint: wikid cat big.md --full — read the whole file"),
+			out.ends_with("hint: wikid cat big.md --lines 1-120 — read a window"),
 			"{out}"
 		);
 	}
@@ -435,6 +457,8 @@ mod tests {
 				text: "# Alpha".to_string(),
 			}],
 			truncated: true,
+			range_start: None,
+			range_end: None,
 			total_lines: 500,
 			total_bytes: 4242,
 			modified: "2026-07-02T10:00:00Z".to_string(),
@@ -442,7 +466,7 @@ mod tests {
 		let out = hashlines(&result);
 		assert!(out.starts_with("1:abcdef012345: # Alpha"), "{out}");
 		assert!(
-			out.contains("… truncated (500 lines / 4242 bytes total) — use --full"),
+			out.contains("… truncated (500 lines / 4242 bytes total) — use --full or --lines <START-END>"),
 			"{out}"
 		);
 		assert!(

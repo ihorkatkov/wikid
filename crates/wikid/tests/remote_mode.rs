@@ -233,6 +233,8 @@ fn remote_mode_matches_local_mode_end_to_end() {
 		&["tree"],
 		&["cat", "index.md"],
 		&["cat", "index.md", "--full"],
+		&["cat", "notes/alpha.md", "--lines", "2-3"],
+		&["cat", "notes/alpha.md", "--lines", "2-3", "--hashes"],
 		&["cat", "notes/alpha.md", "--hashes"],
 		&["grep", "needle"],
 		&["grep", "NEEDLE", "-i", "-l"],

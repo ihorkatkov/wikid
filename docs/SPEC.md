@@ -53,7 +53,7 @@ Commands (CLI verbs ≙ MCP tools ≙ HTTP endpoints):
 |---|---|
 | `status` | Content-first, no-arg default: wikis served, page counts, recently modified, health summary. (AXI #8) |
 | `ls [path]` / `tree` | List pages/directories; includes total counts. (AXI #4) |
-| `cat <path>` | Read a page. Large files truncated with size hint + `--full`. (AXI #3) |
+| `cat <path>` | Read a page. Large files truncated with size hint + `--full`; line windows with `--lines START-END` keep oversized files workable without loading them whole. (AXI #3) |
 | `grep <pattern>` | Search content; ranked-lite (title/path matches boosted), match context, total hit count, explicit zero-result message. (AXI #5) |
 | `glob <pattern>` | Find pages by path pattern. |
 | `write <path>` | Create/overwrite a page (content from stdin or arg). Atomic. |

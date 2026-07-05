@@ -24,8 +24,8 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 | Method | Semantics |
 |---|---|
 | `ls(path: Option<&str>, depth: usize)` | Listing of dirs (trailing `/`) + files at `path` (default root), recursing to `depth` (default 1; `tree` = depth 3). Entries: `path`, `kind` (`dir`/`file`/`page`), `size`, `modified` (RFC3339 UTC). Includes `total_dirs`, `total_files`, `total_pages` for the whole subtree regardless of depth (AXI: pre-computed aggregates). |
-| `cat(path, limit: Option<ReadLimit>)` | Returns `Document { path, content, truncated, total_lines, total_bytes, modified }`. Default limit 400 lines or 32 KiB (whichever first); `None` = full. |
-| `cat_hashes(path, limit: Option<ReadLimit>)` | Same read (same limits/truncation), returned as `HashlinesResult { path, lines: [{line, hash, text}], truncated, total_lines, total_bytes, modified }`. `hash` = first 12 hex chars of SHA-256 of the line text (no EOL). This is the read half of the edit protocol. |
+| `cat(path, limit: Option<ReadLimit>)` / `cat_with_range(path, limit, range)` | Returns `Document { path, content, truncated, range_start?, range_end?, total_lines, total_bytes, modified }`. Default limit 400 lines or 32 KiB (whichever first); `None` = full. A line range is 1-based inclusive, disables truncation, clamps end to EOF, and preserves whole-file totals. |
+| `cat_hashes(path, limit: Option<ReadLimit>)` / `cat_hashes_with_range(path, limit, range)` | Same read (same limits/truncation/range), returned as `HashlinesResult { path, lines: [{line, hash, text}], truncated, range_start?, range_end?, total_lines, total_bytes, modified }`. `hash` = first 12 hex chars of SHA-256 of the line text (no EOL). Windowed reads keep absolute file line numbers so this remains the read half of the edit protocol. |
 | `grep(pattern, opts)` | Regex search (`regex` crate) over pages + UTF-8 text files. Options: `ignore_case`, `files_only`, `context` (lines), `limit` (default 50 matches). Result: `matches: [{path, line, text}]` (+ `context_before/after` when requested), `total_matches`, `matched_files` (files with ≥1 match), `total_files` (files searched), `truncated`. Files whose path stem matches the pattern are ranked first. |
 | `glob(pattern)` | `globset` match over relative paths, e.g. `**/*.md`. Sorted by path. Returns entries + `total`. |
 | `write(path, content)` | Create or overwrite. Creates parent dirs. **Atomic**: `tempfile::NamedTempFile::new_in(parent)` + `persist`. Returns `{path, created: bool, bytes}`. |
@@ -84,7 +84,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), categor
 - `update` `--check` `--force` `--version <vX.Y.Z>` — explicit self-update for the installed `wikid` binary. It queries GitHub releases, selects the raw `wikid-<target>` asset for the current supported target, verifies the sibling `.sha256`, writes a temp file next to the current executable, chmods it executable, and atomically renames it over the current binary. No background checks, no cache, no prompts, no remote daemon update. JSON shape: `{current, target, action, updated, asset?}`.
 - `status`
 - `ls [path]` (depth 1), `tree [path]` (`--depth`, default 3)
-- `cat <path>` `--full` `--hashes` (emit `line:hash: text` per line — the read step before `edit`)
+- `cat <path>` `--full` `--lines <START-END>` `--hashes` (emit `line:hash: text` per line — the read step before `edit`; `--lines` is 1-based inclusive and conflicts with `--full`)
 - `grep <pattern>` `-i` `-l` `-C <n>` `--limit <n>`
 - `glob <pattern>`
 - `write <path>` (content from stdin; `-m <text>` for one-liners)
@@ -104,7 +104,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), categor
   - `GET  /v1/wikis` → `{wikis:[{name, pages}]}`
   - `GET  /v1/wikis/{wiki}/status`
   - `GET  /v1/wikis/{wiki}/ls?path=&depth=`
-  - `GET  /v1/wikis/{wiki}/cat?path=&full=&hashes=` (`hashes=true` → `HashlinesResult` instead of `Document`)
+  - `GET  /v1/wikis/{wiki}/cat?path=&full=&lines=&hashes=` (`lines=START-END`; `hashes=true` → `HashlinesResult` instead of `Document`)
   - `GET  /v1/wikis/{wiki}/grep?pattern=&ignore_case=&files_only=&context=&limit=`
   - `GET  /v1/wikis/{wiki}/glob?pattern=`
   - `GET  /v1/wikis/{wiki}/links?path=`

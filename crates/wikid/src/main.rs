@@ -16,7 +16,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use wikid_core::{
 	Check, DoctorOptions, DoctorProfile, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult,
-	HealthReport, LineEdit, LinkReport, Listing, MvResult, ReadLimit, RmResult, Vault, VaultStatus, WriteResult,
+	HealthReport, LineEdit, LinkReport, Listing, MvResult, ReadLimit, ReadRange, RmResult, Vault, VaultStatus,
+	WriteResult,
 };
 
 use crate::error::CliError;
@@ -95,8 +96,11 @@ enum Command {
 	Cat {
 		path: String,
 		/// Print the whole file instead of the first 400 lines / 32 KiB
-		#[arg(long)]
+		#[arg(long, conflicts_with = "lines")]
 		full: bool,
+		/// Read a 1-based inclusive line range, e.g. --lines 1200-1260
+		#[arg(long, value_name = "START-END")]
+		lines: Option<ReadRange>,
 		/// Prefix each line with its number and hash (line:hash: text) for edit
 		#[arg(long)]
 		hashes: bool,
@@ -738,23 +742,31 @@ impl Backend {
 		}
 	}
 
-	fn cat(&self, path: &str, full: bool) -> Result<Document, CliError> {
+	fn cat(&self, path: &str, full: bool, lines: Option<ReadRange>) -> Result<Document, CliError> {
 		match self {
 			Self::Local(vault) => {
-				let limit = if full { None } else { Some(ReadLimit::default()) };
-				Ok(vault.cat(path, limit)?)
+				let limit = if full || lines.is_some() {
+					None
+				} else {
+					Some(ReadLimit::default())
+				};
+				Ok(vault.cat_with_range(path, limit, lines)?)
 			}
-			Self::Remote(remote) => remote.cat(path, full),
+			Self::Remote(remote) => remote.cat(path, full, lines),
 		}
 	}
 
-	fn cat_hashes(&self, path: &str, full: bool) -> Result<HashlinesResult, CliError> {
+	fn cat_hashes(&self, path: &str, full: bool, lines: Option<ReadRange>) -> Result<HashlinesResult, CliError> {
 		match self {
 			Self::Local(vault) => {
-				let limit = if full { None } else { Some(ReadLimit::default()) };
-				Ok(vault.cat_hashes(path, limit)?)
+				let limit = if full || lines.is_some() {
+					None
+				} else {
+					Some(ReadLimit::default())
+				};
+				Ok(vault.cat_hashes_with_range(path, limit, lines)?)
 			}
-			Self::Remote(remote) => remote.cat_hashes(path, full),
+			Self::Remote(remote) => remote.cat_hashes(path, full, lines),
 		}
 	}
 
@@ -847,12 +859,17 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 			let listing = backend.ls(path.as_deref(), depth)?;
 			Ok(Outcome::ok(emit(json, &listing, || render::listing(&listing, true))))
 		}
-		Command::Cat { path, full, hashes } => {
+		Command::Cat {
+			path,
+			full,
+			lines,
+			hashes,
+		} => {
 			if hashes {
-				let result = backend.cat_hashes(&path, full)?;
+				let result = backend.cat_hashes(&path, full, lines)?;
 				return Ok(Outcome::ok(emit(json, &result, || render::hashlines(&result))));
 			}
-			let doc = backend.cat(&path, full)?;
+			let doc = backend.cat(&path, full, lines)?;
 			Ok(Outcome::ok(emit(json, &doc, || render::document(&doc))))
 		}
 		Command::Grep {

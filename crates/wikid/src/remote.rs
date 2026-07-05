@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use wikid_core::{
 	Check, DoctorProfile, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult, HealthReport,
-	LineEdit, LinkReport, Listing, MvResult, RmResult, VaultStatus, WriteResult,
+	LineEdit, LinkReport, Listing, MvResult, ReadRange, RmResult, VaultStatus, WriteResult,
 };
 
 use crate::error::CliError;
@@ -69,19 +69,24 @@ impl Remote {
 		self.get("ls", &query)
 	}
 
-	pub fn cat(&self, path: &str, full: bool) -> Result<Document, CliError> {
-		self.get("cat", &[("path", path.to_owned()), ("full", full.to_string())])
+	pub fn cat(&self, path: &str, full: bool, lines: Option<ReadRange>) -> Result<Document, CliError> {
+		let mut query = vec![("path", path.to_owned()), ("full", full.to_string())];
+		if let Some(lines) = lines {
+			query.push(("lines", format!("{}-{}", lines.start, lines.end)));
+		}
+		self.get("cat", &query)
 	}
 
-	pub fn cat_hashes(&self, path: &str, full: bool) -> Result<HashlinesResult, CliError> {
-		self.get(
-			"cat",
-			&[
-				("path", path.to_owned()),
-				("full", full.to_string()),
-				("hashes", "true".to_owned()),
-			],
-		)
+	pub fn cat_hashes(&self, path: &str, full: bool, lines: Option<ReadRange>) -> Result<HashlinesResult, CliError> {
+		let mut query = vec![
+			("path", path.to_owned()),
+			("full", full.to_string()),
+			("hashes", "true".to_owned()),
+		];
+		if let Some(lines) = lines {
+			query.push(("lines", format!("{}-{}", lines.start, lines.end)));
+		}
+		self.get("cat", &query)
 	}
 
 	pub fn grep(&self, pattern: &str, opts: &GrepOptions) -> Result<GrepResult, CliError> {

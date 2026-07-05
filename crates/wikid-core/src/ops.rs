@@ -74,6 +74,45 @@ impl Default for ReadLimit {
 	}
 }
 
+/// 1-based inclusive line range for windowed reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadRange {
+	/// First line to return, 1-based.
+	pub start: usize,
+	/// Last line to return, 1-based and inclusive.
+	pub end: usize,
+}
+
+impl std::str::FromStr for ReadRange {
+	type Err = WikidError;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		let Some((start, end)) = s.split_once('-') else {
+			return Err(bad_line_range(s, "expected START-END"));
+		};
+		let start = start
+			.parse::<usize>()
+			.map_err(|_| bad_line_range(s, "start is not a positive integer"))?;
+		let end = end
+			.parse::<usize>()
+			.map_err(|_| bad_line_range(s, "end is not a positive integer"))?;
+		if start == 0 {
+			return Err(bad_line_range(s, "start must be at least 1"));
+		}
+		if end < start {
+			return Err(bad_line_range(s, "end must be greater than or equal to start"));
+		}
+		Ok(Self { start, end })
+	}
+}
+
+fn bad_line_range(input: &str, reason: &str) -> WikidError {
+	WikidError::BadPattern {
+		pattern: input.to_string(),
+		reason: format!("invalid line range: {reason}"),
+	}
+}
+
 /// Result of `cat`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Document {
@@ -83,6 +122,12 @@ pub struct Document {
 	pub content: String,
 	/// Whether `content` was cut by a `ReadLimit`.
 	pub truncated: bool,
+	/// First line returned for a windowed read.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub range_start: Option<usize>,
+	/// Last line returned for a windowed read.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub range_end: Option<usize>,
 	/// Line count of the full file.
 	pub total_lines: usize,
 	/// Byte size of the full file.
@@ -188,6 +233,12 @@ pub struct HashlinesResult {
 	pub lines: Vec<Hashline>,
 	/// Whether `lines` was cut by a `ReadLimit`.
 	pub truncated: bool,
+	/// First line returned for a windowed read.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub range_start: Option<usize>,
+	/// Last line returned for a windowed read.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub range_end: Option<usize>,
 	/// Line count of the full file.
 	pub total_lines: usize,
 	/// Byte size of the full file.
@@ -322,6 +373,17 @@ impl Vault {
 	/// full content; callers wanting the default cap pass
 	/// `Some(ReadLimit::default())` (400 lines / 32 KiB, whichever first).
 	pub fn cat(&self, path: &str, limit: Option<ReadLimit>) -> Result<Document, WikidError> {
+		self.cat_with_range(path, limit, None)
+	}
+
+	/// Reads a line window from a file. Line ranges are 1-based and inclusive;
+	/// the returned metadata still describes the whole file.
+	pub fn cat_with_range(
+		&self,
+		path: &str,
+		limit: Option<ReadLimit>,
+		range: Option<ReadRange>,
+	) -> Result<Document, WikidError> {
 		let target = self.resolve(path)?;
 		if !target.abs.exists() {
 			return Err(WikidError::NotFound { path: target.rel });
@@ -340,14 +402,25 @@ impl Vault {
 		let total_lines = text.lines().count();
 		let total_bytes = meta.len();
 		let modified = rfc3339(meta.modified()?);
-		let (content, truncated) = match limit {
-			None => (text, false),
-			Some(limit) => truncate(&text, limit),
+		let (content, truncated, range_start, range_end) = match range {
+			Some(range) => {
+				let (content, start, end) = line_window(&text, total_lines, range)?;
+				(content, false, Some(start), Some(end))
+			}
+			None => match limit {
+				None => (text, false, None, None),
+				Some(limit) => {
+					let (content, truncated) = truncate(&text, limit);
+					(content, truncated, None, None)
+				}
+			},
 		};
 		Ok(Document {
 			path: target.rel,
 			content,
 			truncated,
+			range_start,
+			range_end,
 			total_lines,
 			total_bytes,
 			modified,
@@ -477,13 +550,25 @@ impl Vault {
 	/// Reads a file as hash-addressed lines: each line paired with its 1-based
 	/// number and the hash `edit` expects. `limit` semantics match `cat`.
 	pub fn cat_hashes(&self, path: &str, limit: Option<ReadLimit>) -> Result<HashlinesResult, WikidError> {
-		let doc = self.cat(path, limit)?;
+		self.cat_hashes_with_range(path, limit, None)
+	}
+
+	/// Reads a line window as hash-addressed lines. Line numbers remain absolute
+	/// file line numbers so the result can feed directly into `edit`.
+	pub fn cat_hashes_with_range(
+		&self,
+		path: &str,
+		limit: Option<ReadLimit>,
+		range: Option<ReadRange>,
+	) -> Result<HashlinesResult, WikidError> {
+		let doc = self.cat_with_range(path, limit, range)?;
+		let offset = doc.range_start.unwrap_or(1);
 		let lines = split_lines(&doc.content)
 			.0
 			.into_iter()
 			.enumerate()
 			.map(|(i, text)| Hashline {
-				line: i + 1,
+				line: offset + i,
 				hash: hash_line(text),
 				text: text.to_string(),
 			})
@@ -492,6 +577,8 @@ impl Vault {
 			path: doc.path,
 			lines,
 			truncated: doc.truncated,
+			range_start: doc.range_start,
+			range_end: doc.range_end,
 			total_lines: doc.total_lines,
 			total_bytes: doc.total_bytes,
 			modified: doc.modified,
@@ -721,6 +808,28 @@ fn entry_for(rel: &str, meta: &fs::Metadata) -> Result<Entry, WikidError> {
 	})
 }
 
+/// Returns a 1-based inclusive line window. `end` clamps to EOF, while a
+/// start beyond EOF is invalid because it cannot produce an addressable view.
+fn line_window(text: &str, total_lines: usize, range: ReadRange) -> Result<(String, usize, usize), WikidError> {
+	if range.start > total_lines {
+		return Err(WikidError::BadPattern {
+			pattern: format!("{}-{}", range.start, range.end),
+			reason: format!("line range starts past end of file ({total_lines} lines)"),
+		});
+	}
+	let end = range.end.min(total_lines);
+	let mut out = String::new();
+	for (line_no, line) in text.split_inclusive('\n').enumerate().map(|(i, line)| (i + 1, line)) {
+		if line_no >= range.start && line_no <= end {
+			out.push_str(line);
+		}
+		if line_no >= end {
+			break;
+		}
+	}
+	Ok((out, range.start, end))
+}
+
 /// Cuts `text` at whole-line boundaries once either limit would be exceeded.
 fn truncate(text: &str, limit: ReadLimit) -> (String, bool) {
 	let mut out = String::new();
@@ -948,6 +1057,32 @@ mod tests {
 		assert!(doc.truncated);
 		assert_eq!(doc.content, "aaaa\nbbbb\n");
 		assert_eq!(doc.total_lines, 3);
+	}
+
+	#[test]
+	fn cat_line_range_returns_window_with_full_file_metadata() {
+		let (_dir, vault) = fixture();
+		let content: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+		vault.write("log.md", &content).unwrap();
+		let doc = vault
+			.cat_with_range("log.md", None, Some(ReadRange { start: 4, end: 6 }))
+			.unwrap();
+		assert_eq!(doc.content, "line 4\nline 5\nline 6\n");
+		assert!(!doc.truncated);
+		assert_eq!(doc.range_start, Some(4));
+		assert_eq!(doc.range_end, Some(6));
+		assert_eq!(doc.total_lines, 10);
+		assert_eq!(doc.total_bytes, content.len() as u64);
+
+		let clamped = vault
+			.cat_with_range("log.md", None, Some(ReadRange { start: 9, end: 99 }))
+			.unwrap();
+		assert_eq!(clamped.content, "line 9\nline 10\n");
+		assert_eq!(clamped.range_end, Some(10));
+		assert!(matches!(
+			vault.cat_with_range("log.md", None, Some(ReadRange { start: 11, end: 12 })),
+			Err(WikidError::BadPattern { .. })
+		));
 	}
 
 	#[test]
@@ -1331,6 +1466,31 @@ mod tests {
 		assert_eq!(seventh.hash, hash_line("alpha status: green"));
 		assert_eq!(seventh.hash.len(), 12);
 		assert!(seventh.hash.chars().all(|c| c.is_ascii_hexdigit()));
+	}
+
+	#[test]
+	fn cat_hashes_line_range_uses_absolute_line_numbers() {
+		let (_dir, vault) = fixture();
+		let result = vault
+			.cat_hashes_with_range("projects/alpha.md", None, Some(ReadRange { start: 7, end: 8 }))
+			.unwrap();
+		assert_eq!(result.range_start, Some(7));
+		assert_eq!(result.range_end, Some(8));
+		assert_eq!(result.lines.len(), 2);
+		assert_eq!(result.lines[0].line, 7);
+		assert_eq!(result.lines[0].text, "alpha status: green");
+		assert_eq!(result.lines[0].hash, hash_line("alpha status: green"));
+		let edit = vault
+			.edit(
+				"projects/alpha.md",
+				&[LineEdit {
+					line: result.lines[0].line,
+					expected_hash: result.lines[0].hash.clone(),
+					new_text: "alpha status: blue".to_string(),
+				}],
+			)
+			.unwrap();
+		assert_eq!(edit.replacements, 1);
 	}
 
 	#[test]

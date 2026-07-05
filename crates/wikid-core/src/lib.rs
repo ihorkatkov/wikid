@@ -23,7 +23,7 @@ pub use frontmatter::Frontmatter;
 pub use links::{Link, LinkKind, LinkReport};
 pub use ops::{
 	Document, EditResult, Entry, EntryKind, GlobResult, GrepMatch, GrepOptions, GrepResult, Hashline, HashlinesResult,
-	LineEdit, Listing, MvResult, ReadLimit, RmResult, WriteResult, hash_line,
+	LineEdit, Listing, MvResult, ReadLimit, ReadRange, RmResult, WriteResult, hash_line,
 };
 pub use status::{RecentPage, VaultStatus};
 pub use vault::Vault;

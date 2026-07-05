@@ -16,7 +16,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use wikid_core::{
 	Check, DoctorOptions, DoctorProfile, EditResult, GlobResult, GrepOptions, GrepResult, HealthReport, LineEdit,
-	LinkReport, Listing, MvResult, ReadLimit, RmResult, Vault, VaultStatus, WriteResult,
+	LinkReport, Listing, MvResult, ReadLimit, ReadRange, RmResult, Vault, VaultStatus, WikidError, WriteResult,
 };
 
 use crate::config::Config;
@@ -190,6 +190,7 @@ struct CatQuery {
 	path: String,
 	#[serde(default)]
 	full: bool,
+	lines: Option<String>,
 	#[serde(default)]
 	hashes: bool,
 }
@@ -200,12 +201,24 @@ async fn cat(
 	query: Result<Query<CatQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
 	let Query(q) = query?;
-	let limit = if q.full { None } else { Some(ReadLimit::default()) };
+	let lines = q.lines.map(|lines| lines.parse::<ReadRange>()).transpose()?;
+	if q.full && lines.is_some() {
+		return Err(WikidError::BadPattern {
+			pattern: "full+lines".to_string(),
+			reason: "--full and lines are mutually exclusive".to_string(),
+		}
+		.into());
+	}
+	let limit = if q.full || lines.is_some() {
+		None
+	} else {
+		Some(ReadLimit::default())
+	};
 	let vault = state.wiki(&wiki)?;
 	if q.hashes {
-		Ok(Json(vault.cat_hashes(&q.path, limit)?).into_response())
+		Ok(Json(vault.cat_hashes_with_range(&q.path, limit, lines)?).into_response())
 	} else {
-		Ok(Json(vault.cat(&q.path, limit)?).into_response())
+		Ok(Json(vault.cat_with_range(&q.path, limit, lines)?).into_response())
 	}
 }
 

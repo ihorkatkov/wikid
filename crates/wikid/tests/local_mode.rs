@@ -132,6 +132,32 @@ fn axi_3_cat_truncates_by_default_with_size_hint_and_full_override() {
 }
 
 #[test]
+fn cat_lines_reads_windows_and_hashes_use_absolute_line_numbers() {
+	let vault = fixture_vault();
+	let out = stdout_of(wikid(vault.path()).args(["cat", "big.md", "--lines", "498-999"]));
+	assert!(
+		out.contains("line 498\nline 499\nline 500"),
+		"window missing tail: {out}"
+	);
+	assert!(out.contains("lines 498-500 of 500"), "window metadata missing: {out}");
+	assert!(
+		!out.contains("truncated"),
+		"window should not be marked truncated: {out}"
+	);
+
+	let json = json_of(wikid(vault.path()).args(["cat", "big.md", "--lines", "498-500", "--hashes", "--json"]));
+	assert_eq!(json["range_start"], 498);
+	assert_eq!(json["range_end"], 500);
+	assert_eq!(json["lines"][0]["line"], 498);
+	assert_eq!(json["lines"][0]["text"], "line 498");
+
+	wikid(vault.path())
+		.args(["cat", "big.md", "--full", "--lines", "1-2"])
+		.assert()
+		.failure();
+}
+
+#[test]
 fn axi_4_zero_results_are_explicit() {
 	let vault = fixture_vault();
 	wikid(vault.path())
