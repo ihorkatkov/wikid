@@ -35,12 +35,14 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p wikid --bin wikid
       - name: Package
         run: |
+          cp target/${{ matrix.target }}/release/wikid wikid-${{ matrix.target }}
+          shasum -a 256 wikid-${{ matrix.target }} > wikid-${{ matrix.target }}.sha256
           tar -C target/${{ matrix.target }}/release -czf wikid-${{ matrix.target }}.tar.gz wikid
           shasum -a 256 wikid-${{ matrix.target }}.tar.gz > wikid-${{ matrix.target }}.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: wikid-${{ matrix.target }}
-          path: wikid-${{ matrix.target }}.tar.gz*
+          path: wikid-${{ matrix.target }}*
 
   release:
     needs: build

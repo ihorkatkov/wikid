@@ -26,6 +26,8 @@ pub struct RecentPage {
 /// Result of `status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VaultStatus {
+	/// Running wikid package version.
+	pub version: String,
 	/// Absolute vault root on disk.
 	pub root: String,
 	/// Visible Markdown pages.
@@ -69,6 +71,7 @@ impl Vault {
 			.collect();
 		let doctor_summary = self.doctor(&DoctorOptions::default())?.severity_summary();
 		Ok(VaultStatus {
+			version: env!("CARGO_PKG_VERSION").to_string(),
 			root: self.root().display().to_string(),
 			total_pages,
 			total_files,

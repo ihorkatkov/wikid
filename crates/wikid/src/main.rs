@@ -7,6 +7,7 @@
 mod error;
 mod remote;
 mod render;
+mod update;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,8 +15,8 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use wikid_core::{
-	Check, DoctorOptions, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult, HealthReport,
-	LineEdit, LinkReport, Listing, MvResult, ReadLimit, RmResult, Vault, VaultStatus, WriteResult,
+	Check, DoctorOptions, DoctorProfile, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult,
+	HealthReport, LineEdit, LinkReport, Listing, MvResult, ReadLimit, RmResult, Vault, VaultStatus, WriteResult,
 };
 
 use crate::error::CliError;
@@ -66,6 +67,18 @@ enum Command {
 	Token {
 		#[command(subcommand)]
 		command: TokenCommand,
+	},
+	/// Update the installed wikid binary from GitHub releases
+	Update {
+		/// Check whether an update is available without installing it
+		#[arg(long)]
+		check: bool,
+		/// Reinstall even when the selected release is not newer
+		#[arg(long)]
+		force: bool,
+		/// Install a specific release tag, e.g. v0.2.0
+		#[arg(long, value_name = "TAG")]
+		version: Option<String>,
 	},
 	/// Show page counts, recent activity, and health summary
 	Status,
@@ -153,6 +166,9 @@ enum Command {
 		/// Comma-separated subset of checks to run (e.g. broken_links,orphan_pages)
 		#[arg(long, value_name = "a,b,c")]
 		checks: Option<String>,
+		/// Doctor policy profile: llm-wiki (default) or strict
+		#[arg(long, value_name = "NAME", default_value = "llm-wiki")]
+		profile: DoctorProfile,
 	},
 }
 
@@ -181,14 +197,23 @@ fn main() {
 	// Errors go to stdout (structured, machine-parseable), exit code 1.
 	match run(cli) {
 		Ok(out) => {
-			println!("{}", out.text);
-			std::process::exit(out.code);
+			write_stdout(&out.text, out.code);
 		}
 		Err(err) => {
-			println!("{}", if json { err.json() } else { err.human() });
-			std::process::exit(1);
+			write_stdout(&if json { err.json() } else { err.human() }, 1);
 		}
 	}
+}
+
+fn write_stdout(text: &str, code: i32) -> ! {
+	let mut stdout = std::io::stdout().lock();
+	if let Err(err) = writeln!(stdout, "{text}") {
+		if err.kind() == std::io::ErrorKind::BrokenPipe {
+			std::process::exit(0);
+		}
+		std::process::exit(1);
+	}
+	std::process::exit(code);
 }
 
 fn run(cli: Cli) -> Result<Outcome, CliError> {
@@ -198,6 +223,7 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 		Command::Serve => return run_serve(cli.config.as_deref(), cli.json),
 		Command::Init { path } => return run_init(path.as_deref(), cli.config.as_deref(), cli.json),
 		Command::Token { command } => return run_token(command, cli.config.as_deref(), cli.json),
+		Command::Update { check, force, version } => return run_update(check, force, version.as_deref(), cli.json),
 		other => other,
 	};
 	let explicit_dir = cli.dir;
@@ -303,6 +329,11 @@ fn run_init(path: Option<&str>, config_arg: Option<&str>, json: bool) -> Result<
 		skipped: scaffold.skipped,
 	};
 	Ok(Outcome::ok(emit(json, &result, || render_init(&result))))
+}
+
+fn run_update(check: bool, force: bool, version: Option<&str>, json: bool) -> Result<Outcome, CliError> {
+	let result = update::run(check, force, version)?;
+	Ok(Outcome::ok(emit(json, &result, || update::render(&result))))
 }
 
 fn run_token(command: TokenCommand, config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> {
@@ -776,7 +807,12 @@ impl Backend {
 		}
 	}
 
-	fn doctor(&self, stale_days: Option<u64>, checks: Option<&[Check]>) -> Result<HealthReport, CliError> {
+	fn doctor(
+		&self,
+		stale_days: Option<u64>,
+		checks: Option<&[Check]>,
+		profile: DoctorProfile,
+	) -> Result<HealthReport, CliError> {
 		match self {
 			Self::Local(vault) => {
 				let mut opts = DoctorOptions::default();
@@ -784,16 +820,19 @@ impl Backend {
 					opts.stale_days = days;
 				}
 				opts.checks = checks.map(<[Check]>::to_vec);
+				opts.profile = profile;
 				Ok(vault.doctor(&opts)?)
 			}
-			Self::Remote(remote) => remote.doctor(stale_days, checks),
+			Self::Remote(remote) => remote.doctor(stale_days, checks, profile),
 		}
 	}
 }
 
 fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, CliError> {
 	match command {
-		Command::Serve | Command::Init { .. } | Command::Token { .. } => unreachable!("handled in run()"),
+		Command::Serve | Command::Init { .. } | Command::Token { .. } | Command::Update { .. } => {
+			unreachable!("handled in run()")
+		}
 		Command::Status => {
 			let status = backend.status()?;
 			Ok(Outcome::ok(emit(json, &status, || {
@@ -880,9 +919,13 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 			let report = backend.links(&path)?;
 			Ok(Outcome::ok(emit(json, &report, || render::links(&report))))
 		}
-		Command::Doctor { stale_days, checks } => {
+		Command::Doctor {
+			stale_days,
+			checks,
+			profile,
+		} => {
 			let checks = checks.map(|list| parse_checks(&list)).transpose()?;
-			let report = backend.doctor(stale_days, checks.as_deref())?;
+			let report = backend.doctor(stale_days, checks.as_deref(), profile)?;
 			Ok(Outcome::ok(emit(json, &report, || render::doctor(&report))))
 		}
 	}

@@ -74,7 +74,15 @@ Structural only — no LLM, no semantics:
 - oversized pages (should-split hint)
 - duplicate titles / conflicting filenames
 
-Output: issue list with severity, path, description, suggested action (as in v0.1 §10.6). Contradiction detection, missing-source detection: deferred to the thinking layer.
+Default profile: `llm-wiki`. It bakes in the original LLM Wiki directory convention while remaining explicit and overridable by `--profile strict`:
+- authored pages: `entities/`, `concepts/`, `queries/`, `meetings/`
+- raw captures: `raw/**`
+- assets: `raw/assets/**`
+- root meta pages: `SCHEMA.md`, `index.md`, `log.md`
+
+The default profile keeps authored-page findings actionable: raw extraction tags such as `[[P]]`, `[[H1]]`–`[[H6]]`, and `[[FIGCAPTION]]` are ignored inside `raw/**`; other raw-capture broken links are downgraded to low raw-source warnings; root meta pages are exempt from missing-frontmatter warnings; duplicate stems are classified by page/asset kind. `strict` reports raw structural findings without those LLM-wiki suppressions. Markdown links with root-relative URL destinations (`/docs/...`, `/smolvm/...`) are treated as external navigation rather than local vault links.
+
+Output: issue list with severity, path, description, suggested action (as in v0.1 §10.6), grouped for humans into authored-page, raw-source, asset-hygiene, graph/navigation, and size/performance buckets. Contradiction detection, missing-source detection: deferred to the thinking layer.
 
 ## 6. What "clear path to cloud" means
 

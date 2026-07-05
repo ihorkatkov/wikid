@@ -6,8 +6,8 @@
 //! caller prints it with `println!`.
 
 use wikid_core::{
-	Document, EditResult, Entry, EntryKind, GlobResult, GrepResult, HashlinesResult, HealthReport, LinkReport, Listing,
-	MvResult, RmResult, Severity, VaultStatus, WriteResult,
+	Document, EditResult, Entry, EntryKind, GlobResult, GrepResult, HashlinesResult, HealthReport, IssueCategory,
+	LinkReport, Listing, MvResult, RmResult, Severity, VaultStatus, WriteResult,
 };
 
 /// Formats bytes as a compact human size (B / KiB / MiB).
@@ -47,6 +47,7 @@ pub fn status(status: &VaultStatus, remote: bool) -> String {
 	let root_label = if remote { "root (server)" } else { "root" };
 	let mut lines = vec![
 		format!("wiki: {wiki_name}"),
+		format!("version: {}", status.version),
 		format!("{root_label}: {}", status.root),
 		format!(
 			"pages: {}  files: {}  size: {}",
@@ -238,24 +239,58 @@ pub fn links(report: &LinkReport) -> String {
 
 pub fn doctor(report: &HealthReport) -> String {
 	let mut lines = vec![report.summary.clone()];
-	for issue in &report.issues {
-		lines.push(format!(
-			"[{}] {} {} — {}",
-			severity_name(issue.severity),
-			issue.check.name(),
-			issue.path,
-			issue.detail
-		));
+	for category in [
+		IssueCategory::AuthoredPages,
+		IssueCategory::RawSource,
+		IssueCategory::AssetHygiene,
+		IssueCategory::GraphNavigation,
+		IssueCategory::SizePerformance,
+	] {
+		let issues: Vec<_> = report
+			.issues
+			.iter()
+			.filter(|issue| issue.category == category)
+			.collect();
+		if issues.is_empty() {
+			continue;
+		}
+		lines.push(String::new());
+		lines.push(format!("{} ({})", category_title(category), issues.len()));
+		for issue in issues.iter().take(5) {
+			lines.push(format!(
+				"[{}] {} {} — {}",
+				severity_name(issue.severity),
+				issue.check.name(),
+				issue.path,
+				issue.detail
+			));
+		}
+		if issues.len() > 5 {
+			lines.push(format!(
+				"… {} more omitted; use --json for full detail",
+				issues.len() - 5
+			));
+		}
 	}
 	lines.push(
 		if report.issues.is_empty() {
 			"hint: wikid status — vault overview"
 		} else {
-			"hint: wikid cat <path> — inspect a flagged page"
+			"hint: wikid cat <path> — inspect a flagged page; use --profile strict for raw structural lint"
 		}
 		.to_string(),
 	);
 	lines.join("\n")
+}
+
+fn category_title(category: IssueCategory) -> &'static str {
+	match category {
+		IssueCategory::AuthoredPages => "actionable authored-page issues",
+		IssueCategory::RawSource => "raw-source warnings",
+		IssueCategory::AssetHygiene => "asset hygiene",
+		IssueCategory::GraphNavigation => "graph/navigation issues",
+		IssueCategory::SizePerformance => "size/performance warnings",
+	}
 }
 
 #[cfg(test)]

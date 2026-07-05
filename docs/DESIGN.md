@@ -34,7 +34,7 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 | `rm(path)` | Delete file (not dirs). The `--force` gate is CLI/HTTP-level, not core. |
 | `links(path)` | `LinkReport { outgoing: [{raw, target, resolved: Option<path>, kind: wikilink/markdown}], backlinks: [path] }`. Backlinks = scan all pages for links resolving to `path`. |
 | `doctor(opts)` | See §5. |
-| `status()` | `VaultStatus { root, total_pages, total_files, total_bytes, recent: [{path, modified}] (5 most recent pages), doctor_summary: {high, medium, low} }`. |
+| `status()` | `VaultStatus { version, root, total_pages, total_files, total_bytes, recent: [{path, modified}] (5 most recent pages), doctor_summary: {high, medium, low} }`. |
 
 **Error model** (`thiserror` enum `WikidError`): `NotFound`, `InvalidPath`, `AlreadyExists`, `StaleEdit`, `BadEdit`, `NotUtf8`, `BadPattern`, `Io`. Each maps to a stable string `code()` and an optional `hint()` (used verbatim by CLI and HTTP error bodies).
 
@@ -47,7 +47,9 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 
 ## 5. Core: doctor checks
 
-All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, detail, suggested_action}`. Report includes per-check counts and a one-line summary. Exit code 0 even with findings (it's a report; `--fail-on <severity>` can gate CI later — not in MVP).
+All structural, no LLM. Each issue: `{check, severity (low/medium/high), category, path, detail, suggested_action}`. Report includes per-check counts and a one-line summary. Exit code 0 even with findings (it's a report; `--fail-on <severity>` can gate CI later — not in MVP).
+
+`DoctorOptions.profile` defaults to `llm-wiki`, an opinionated LLM Wiki policy: authored paths are `entities/**`, `concepts/**`, `queries/**`, and `meetings/**`; raw captures are `raw/**`; assets are `raw/assets/**`; root meta pages are `SCHEMA.md`, `index.md`, and `log.md`. In this profile, raw extraction wikilinks `[[P]]`, `[[H1]]`–`[[H6]]`, and `[[FIGCAPTION]]` are not reported as broken links; other raw-capture broken links are downgraded to low raw-source warnings; raw captures and root meta pages are excluded from missing-frontmatter adoption and findings. `--profile strict` disables those policy suppressions while preserving engine-level URL parsing behavior. Human output groups issues as `authored_pages`, `raw_source`, `asset_hygiene`, `graph_navigation`, and `size_performance`; JSON carries full issues without human truncation.
 
 | Check | Trigger | Severity |
 |---|---|---|
@@ -58,7 +60,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 | `malformed_frontmatter` | `---` block present but YAML parse/type-check fails; issue detail includes the YAML parser/type error string | medium |
 | `stale_pages` | mtime older than `stale_days` (default 90) | low |
 | `oversized_pages` | > 64 KiB or > 1500 lines | medium |
-| `duplicate_stems` | same case-insensitive stem at multiple paths (breaks wikilink resolution) | medium |
+| `duplicate_stems` | same case-insensitive stem at multiple paths (breaks wikilink resolution); default `llm-wiki` profile keeps page/page as medium, page/asset as low, and suppresses asset/asset noise | medium/low |
 
 ## 6. CLI
 
@@ -79,6 +81,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 
 - `init [path]` — create a blank LLM Wiki scaffold and register it in config. It creates `index.md`, `log.md`, `AGENTS.md`, and `raw/`, `raw/assets/`, `concepts/`, `entities/`, `questions/`, `syntheses/`; never overwrites existing files; works in non-empty directories and Obsidian vaults; writes/updates config idempotently.
 - `token show [actor]` — explicit secret-revealing local command. Defaults to `admin`; prints exactly one matching token or errors on none/multiple. JSON shape: `{actor, token, config_path}`.
+- `update` `--check` `--force` `--version <vX.Y.Z>` — explicit self-update for the installed `wikid` binary. It queries GitHub releases, selects the raw `wikid-<target>` asset for the current supported target, verifies the sibling `.sha256`, writes a temp file next to the current executable, chmods it executable, and atomically renames it over the current binary. No background checks, no cache, no prompts, no remote daemon update. JSON shape: `{current, target, action, updated, asset?}`.
 - `status`
 - `ls [path]` (depth 1), `tree [path]` (`--depth`, default 3)
 - `cat <path>` `--full` `--hashes` (emit `line:hash: text` per line — the read step before `edit`)
@@ -90,12 +93,12 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
 - `mv <from> <to>` `--force`
 - `rm <path> --force`
 - `links <path>`
-- `doctor` `--stale-days <n>` `--checks <a,b,c>`
+- `doctor` `--stale-days <n>` `--checks <a,b,c>` `--profile <llm-wiki|strict>`
 - `serve` `--config <path>` (discovery: `--config` → `$WIKID_CONFIG` → `./wikid.toml` → `~/.config/wikid/config.toml`; write target for bootstrap/mutation: explicit/env path even if absent, else existing `./wikid.toml`, else global config)
 
 ## 7. HTTP API (`wikid-server`)
 
-- `GET /health` — unauthenticated `{"status":"ok"}`.
+- `GET /health` — unauthenticated `{"status":"ok","version":"<CARGO_PKG_VERSION>"}` so clients can surface client/server version mismatches without blocking compatible operations.
 - Everything else requires `Authorization: Bearer <token>`; unknown token → 401 `{"error":{"code":"unauthorized",…}}`.
 - Routes (all under a named wiki; unknown wiki → 404 `unknown_wiki` listing available names). In remote mode, `status.root` is the server-side filesystem path; it is not a path the client machine can read directly. Human CLI rendering labels it `root (server): …`, while `--json` preserves the shared `VaultStatus` struct unchanged:
   - `GET  /v1/wikis` → `{wikis:[{name, pages}]}`
@@ -105,7 +108,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), path, d
   - `GET  /v1/wikis/{wiki}/grep?pattern=&ignore_case=&files_only=&context=&limit=`
   - `GET  /v1/wikis/{wiki}/glob?pattern=`
   - `GET  /v1/wikis/{wiki}/links?path=`
-  - `GET  /v1/wikis/{wiki}/doctor?stale_days=&checks=`
+  - `GET  /v1/wikis/{wiki}/doctor?stale_days=&checks=&profile=`
   - `PUT  /v1/wikis/{wiki}/pages` body `{path, content}`
   - `POST /v1/wikis/{wiki}/edit` body `{path, edits: [{line, expected_hash, new_text}]}`
   - `POST /v1/wikis/{wiki}/mv` body `{from, to, force}`

@@ -8,8 +8,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use wikid_core::{
-	Check, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult, HealthReport, LineEdit,
-	LinkReport, Listing, MvResult, RmResult, VaultStatus, WriteResult,
+	Check, DoctorProfile, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult, HealthReport,
+	LineEdit, LinkReport, Listing, MvResult, RmResult, VaultStatus, WriteResult,
 };
 
 use crate::error::CliError;
@@ -105,8 +105,13 @@ impl Remote {
 		self.get("links", &[("path", path.to_owned())])
 	}
 
-	pub fn doctor(&self, stale_days: Option<u64>, checks: Option<&[Check]>) -> Result<HealthReport, CliError> {
-		let mut query = Vec::new();
+	pub fn doctor(
+		&self,
+		stale_days: Option<u64>,
+		checks: Option<&[Check]>,
+		profile: DoctorProfile,
+	) -> Result<HealthReport, CliError> {
+		let mut query = vec![("profile", profile.name().to_owned())];
 		if let Some(days) = stale_days {
 			query.push(("stale_days", days.to_string()));
 		}

@@ -17,7 +17,7 @@ pub mod vault;
 #[cfg(test)]
 pub mod test_fixtures;
 
-pub use doctor::{Check, DoctorOptions, HealthReport, Issue, Severity, SeveritySummary};
+pub use doctor::{Check, DoctorOptions, DoctorProfile, HealthReport, Issue, IssueCategory, Severity, SeveritySummary};
 pub use error::WikidError;
 pub use frontmatter::Frontmatter;
 pub use links::{Link, LinkKind, LinkReport};

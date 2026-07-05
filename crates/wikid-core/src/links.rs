@@ -108,11 +108,15 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 			.strip_prefix('<')
 			.and_then(|s| s.strip_suffix('>'))
 			.unwrap_or(inner);
-		if inner.starts_with("http://") || inner.starts_with("https://") || inner.starts_with("mailto:") {
+		if inner.starts_with("http://")
+			|| inner.starts_with("https://")
+			|| inner.starts_with("mailto:")
+			|| inner.starts_with('/')
+		{
 			continue;
 		}
 		let target = inner.split('#').next().unwrap_or(inner).trim();
-		if target.is_empty() {
+		if target.is_empty() || target.starts_with('/') {
 			continue;
 		}
 		found.push((
@@ -337,7 +341,7 @@ mod tests {
 	fn extracts_markdown_links_and_skips_external_and_anchors() {
 		let links = extract_links(
 			"[guide](notes/guide.md) ![img](img/logo.png) [w](https://e.com) \
-			 [h](http://e.com) [m](mailto:a@b.c) [a](#top) [[#heading]] [b](<my file.md>)\n",
+			 [h](http://e.com) [m](mailto:a@b.c) [root](/docs/page) [a](#top) [[#heading]] [b](<my file.md>)\n",
 		);
 		let targets: Vec<(&str, &str)> = links.iter().map(|l| (l.raw.as_str(), l.target.as_str())).collect();
 		assert_eq!(

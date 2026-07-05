@@ -81,10 +81,11 @@ fi
 cargo "${install_args[@]}"
 
 [[ -x "$bin_dir/wikid" ]] || fail "wikid was not installed at $bin_dir/wikid"
-[[ -x "$bin_dir/boxd-worktree" ]] || fail "boxd-worktree was not installed at $bin_dir/boxd-worktree"
 
 log "installed wikid: $($bin_dir/wikid --version)"
-log "installed boxd-worktree: $bin_dir/boxd-worktree"
+if [[ -x "$bin_dir/boxd-worktree" ]]; then
+	log "installed boxd-worktree: $bin_dir/boxd-worktree"
+fi
 if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
 	log "add this to your shell profile: export PATH=\"$bin_dir:\$PATH\""
 fi

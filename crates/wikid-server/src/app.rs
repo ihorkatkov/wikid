@@ -15,8 +15,8 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use wikid_core::{
-	Check, DoctorOptions, EditResult, GlobResult, GrepOptions, GrepResult, HealthReport, LineEdit, LinkReport, Listing,
-	MvResult, ReadLimit, RmResult, Vault, VaultStatus, WriteResult,
+	Check, DoctorOptions, DoctorProfile, EditResult, GlobResult, GrepOptions, GrepResult, HealthReport, LineEdit,
+	LinkReport, Listing, MvResult, ReadLimit, RmResult, Vault, VaultStatus, WriteResult,
 };
 
 use crate::config::Config;
@@ -85,7 +85,7 @@ pub fn app(state: AppState) -> Router {
 }
 
 async fn health() -> Json<serde_json::Value> {
-	Json(serde_json::json!({"status": "ok"}))
+	Json(serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")}))
 }
 
 async fn route_not_found() -> ApiError {
@@ -271,6 +271,7 @@ async fn links(
 struct DoctorQuery {
 	stale_days: Option<u64>,
 	checks: Option<String>,
+	profile: Option<DoctorProfile>,
 }
 
 async fn doctor(
@@ -289,6 +290,9 @@ async fn doctor(
 			.map(|name| name.trim().parse::<Check>())
 			.collect::<Result<Vec<_>, _>>()?;
 		opts.checks = Some(checks);
+	}
+	if let Some(profile) = q.profile {
+		opts.profile = profile;
 	}
 	Ok(Json(state.wiki(&wiki)?.doctor(&opts)?))
 }
@@ -448,7 +452,7 @@ mod tests {
 		let request = Request::builder().uri("/health").body(Body::empty()).unwrap();
 		let (status, body) = call(&app, request).await;
 		assert_eq!(status, StatusCode::OK);
-		assert_eq!(body, json!({"status": "ok"}));
+		assert_eq!(body, json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")}));
 	}
 
 	#[tokio::test]

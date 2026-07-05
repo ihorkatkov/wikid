@@ -26,6 +26,15 @@ curl -fsSL https://raw.githubusercontent.com/ihorkatkov/wikid/main/install.sh | 
 
 The installer builds from source with `cargo install`, bootstrapping Rust with rustup if `cargo` is not already available; from a checkout, `./install.sh` works too. Prebuilt binaries for macOS and Linux are available for manual download on the [releases page](https://github.com/ihorkatkov/wikid/releases).
 
+After installing once, update the local `wikid` binary explicitly with:
+
+```sh
+wikid update
+wikid update --check        # report whether a newer release exists
+```
+
+`wikid update` updates only the binary on the machine where it runs. To update a daemon, run it on the server host and restart the daemon/process manager if needed.
+
 ### 1. Make (or reuse) a wiki
 
 Any directory of Markdown files is already a wiki — point at an existing Obsidian vault and it just works. Or scaffold a blank LLM wiki:
@@ -134,6 +143,7 @@ Every command works identically in local and remote mode, and every command take
 | `mv` / `rm` | Rename and delete (`rm` requires `--force` — never an interactive prompt) |
 | `links` | Outgoing links and backlinks from the wikilink graph |
 | `doctor` | Structural health checks: broken wikilinks, orphans, stale and oversized pages |
+| `update` | Explicitly update the installed local `wikid` binary from verified GitHub release assets |
 
 Output follows the [AXI principles](https://axi.md/) for agent-facing CLIs: token-efficient, content-first, structured errors on stdout, exit codes 0/1/2, contextual next-step hints, never interactive.
 

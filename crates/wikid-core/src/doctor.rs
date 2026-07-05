@@ -35,6 +35,59 @@ pub enum Severity {
 	High,
 }
 
+/// Built-in doctor policy profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorProfile {
+	/// Opinionated defaults for LLM wikis: authored pages stay actionable,
+	/// source captures/assets/meta pages are downgraded or ignored.
+	#[default]
+	#[serde(alias = "llm-wiki")]
+	LlmWiki,
+	/// Raw structural lint with no LLM-wiki suppressions.
+	Strict,
+}
+
+impl DoctorProfile {
+	pub fn name(self) -> &'static str {
+		match self {
+			Self::LlmWiki => "llm-wiki",
+			Self::Strict => "strict",
+		}
+	}
+}
+
+impl std::str::FromStr for DoctorProfile {
+	type Err = WikidError;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		match s {
+			"llm-wiki" | "llm_wiki" | "default" => Ok(Self::LlmWiki),
+			"strict" => Ok(Self::Strict),
+			_ => Err(WikidError::BadPattern {
+				pattern: s.to_string(),
+				reason: "unknown doctor profile; expected llm-wiki or strict".to_string(),
+			}),
+		}
+	}
+}
+
+/// Human-oriented grouping for doctor findings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueCategory {
+	/// Authored wiki pages where findings are normally actionable.
+	AuthoredPages,
+	/// Raw source captures and extraction artifacts.
+	RawSource,
+	/// Attachment/asset hygiene.
+	AssetHygiene,
+	/// Link graph and navigation structure.
+	GraphNavigation,
+	/// Size and freshness warnings.
+	SizePerformance,
+}
+
 /// The eight structural checks, in report order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -124,6 +177,9 @@ pub struct DoctorOptions {
 	pub stale_days: u64,
 	/// Which checks to run; `None` runs all eight.
 	pub checks: Option<Vec<Check>>,
+	/// Lint policy profile.
+	#[serde(default)]
+	pub profile: DoctorProfile,
 }
 
 impl Default for DoctorOptions {
@@ -131,6 +187,7 @@ impl Default for DoctorOptions {
 		Self {
 			stale_days: DEFAULT_STALE_DAYS,
 			checks: None,
+			profile: DoctorProfile::default(),
 		}
 	}
 }
@@ -140,8 +197,10 @@ impl Default for DoctorOptions {
 pub struct Issue {
 	/// The check that produced this finding.
 	pub check: Check,
-	/// Fixed per check (DESIGN §5 table).
+	/// Per-check severity, optionally adjusted by the active doctor profile.
 	pub severity: Severity,
+	/// Output grouping for humans and agents.
+	pub category: IssueCategory,
 	/// Vault-relative path the finding is about.
 	pub path: String,
 	/// What is wrong, specifically.
@@ -242,14 +301,14 @@ impl Vault {
 		let mut issues = Vec::new();
 		for check in &enabled {
 			let mut found = match check {
-				Check::BrokenLinks => broken_links(&pages),
+				Check::BrokenLinks => broken_links(&pages, opts.profile),
 				Check::AmbiguousLinks => ambiguous_links(&pages),
 				Check::OrphanPages => orphan_pages(&pages),
-				Check::MissingFrontmatter => missing_frontmatter(&pages),
+				Check::MissingFrontmatter => missing_frontmatter(&pages, opts.profile),
 				Check::MalformedFrontmatter => malformed_frontmatter(&pages),
 				Check::StalePages => stale_pages(&pages, opts.stale_days),
 				Check::OversizedPages => oversized_pages(&pages),
-				Check::DuplicateStems => duplicate_stems(&files),
+				Check::DuplicateStems => duplicate_stems(&files, opts.profile),
 			};
 			found.sort_by(|a, b| a.path.cmp(&b.path));
 			issues.extend(found);
@@ -268,13 +327,62 @@ impl Vault {
 }
 
 fn issue(check: Check, path: &str, detail: String, action: &str) -> Issue {
+	issue_with_severity(check, check.severity(), path, detail, action)
+}
+
+fn issue_with_severity(check: Check, severity: Severity, path: &str, detail: String, action: &str) -> Issue {
 	Issue {
 		check,
-		severity: check.severity(),
+		severity,
+		category: category_for(check, path),
 		path: path.to_string(),
 		detail,
 		suggested_action: action.to_string(),
 	}
+}
+
+fn category_for(check: Check, path: &str) -> IssueCategory {
+	if is_asset_path(path) {
+		return IssueCategory::AssetHygiene;
+	}
+	if is_raw_path(path) {
+		return IssueCategory::RawSource;
+	}
+	if is_authored_page(path) {
+		return IssueCategory::AuthoredPages;
+	}
+	match check {
+		Check::BrokenLinks | Check::AmbiguousLinks | Check::OrphanPages | Check::DuplicateStems => {
+			IssueCategory::GraphNavigation
+		}
+		Check::StalePages | Check::OversizedPages => IssueCategory::SizePerformance,
+		Check::MissingFrontmatter | Check::MalformedFrontmatter => IssueCategory::AuthoredPages,
+	}
+}
+
+fn is_raw_path(path: &str) -> bool {
+	path == "raw" || path.starts_with("raw/")
+}
+
+fn is_asset_path(path: &str) -> bool {
+	path.starts_with("raw/assets/")
+}
+
+fn is_root_meta_page(path: &str) -> bool {
+	!path.contains('/')
+		&& (path.eq_ignore_ascii_case("SCHEMA.md")
+			|| path.eq_ignore_ascii_case("index.md")
+			|| path.eq_ignore_ascii_case("log.md"))
+}
+
+fn is_authored_page(path: &str) -> bool {
+	["entities/", "concepts/", "queries/", "meetings/"]
+		.iter()
+		.any(|prefix| path.starts_with(prefix))
+}
+
+fn is_source_capture_wikilink(target: &str) -> bool {
+	matches!(target, "P" | "FIGCAPTION" | "H1" | "H2" | "H3" | "H4" | "H5" | "H6")
 }
 
 fn summarize(issues: &[Issue], total_pages: usize) -> String {
@@ -291,16 +399,27 @@ fn summarize(issues: &[Issue], total_pages: usize) -> String {
 	)
 }
 
-fn broken_links(pages: &[PageScan]) -> Vec<Issue> {
+fn broken_links(pages: &[PageScan], profile: DoctorProfile) -> Vec<Issue> {
 	pages
 		.iter()
 		.flat_map(|page| {
 			page.links
 				.iter()
 				.filter(|(_, resolution)| matches!(resolution, Resolution::Broken))
+				.filter(move |(link, _)| {
+					!matches!(profile, DoctorProfile::LlmWiki)
+						|| !is_raw_path(&page.rel)
+						|| !is_source_capture_wikilink(&link.target)
+				})
 				.map(|(link, _)| {
-					issue(
+					let severity = if matches!(profile, DoctorProfile::LlmWiki) && is_raw_path(&page.rel) {
+						Severity::Low
+					} else {
+						Check::BrokenLinks.severity()
+					};
+					issue_with_severity(
 						Check::BrokenLinks,
+						severity,
 						&page.rel,
 						format!("{} resolves to nothing", link.raw),
 						"create the target page or fix the link",
@@ -362,18 +481,29 @@ fn is_root_index(rel: &str) -> bool {
 	!rel.contains('/') && (rel.eq_ignore_ascii_case("index.md") || rel.eq_ignore_ascii_case("readme.md"))
 }
 
-fn missing_frontmatter(pages: &[PageScan]) -> Vec<Issue> {
+fn missing_frontmatter(pages: &[PageScan], profile: DoctorProfile) -> Vec<Issue> {
 	// Only meaningful when the vault "uses" frontmatter: at least half of the
-	// pages carry a block (well-formed or not).
-	let with_block = pages
+	// eligible pages carry a block (well-formed or not). In the LLM-wiki
+	// profile, raw captures and root meta pages do not influence adoption.
+	let eligible: Vec<&PageScan> = pages
+		.iter()
+		.filter(|page| {
+			!matches!(profile, DoctorProfile::LlmWiki) || (!is_raw_path(&page.rel) && !is_root_meta_page(&page.rel))
+		})
+		.collect();
+	let with_block = eligible
 		.iter()
 		.filter(|page| !matches!(page.frontmatter, Frontmatter::Absent))
 		.count();
-	if pages.is_empty() || with_block * 2 < pages.len() {
+	if eligible.is_empty()
+		|| match profile {
+			DoctorProfile::LlmWiki => with_block * 2 < eligible.len(),
+			DoctorProfile::Strict => with_block == 0,
+		} {
 		return Vec::new();
 	}
-	pages
-		.iter()
+	eligible
+		.into_iter()
 		.filter(|page| matches!(page.frontmatter, Frontmatter::Absent))
 		.map(|page| {
 			issue(
@@ -440,7 +570,7 @@ fn oversized_pages(pages: &[PageScan]) -> Vec<Issue> {
 		.collect()
 }
 
-fn duplicate_stems(files: &[(String, PathBuf)]) -> Vec<Issue> {
+fn duplicate_stems(files: &[(String, PathBuf)], profile: DoctorProfile) -> Vec<Issue> {
 	let mut by_stem: BTreeMap<String, Vec<&str>> = BTreeMap::new();
 	for (rel, _) in files {
 		let name = rel.rsplit('/').next().unwrap_or(rel);
@@ -450,14 +580,27 @@ fn duplicate_stems(files: &[(String, PathBuf)]) -> Vec<Issue> {
 	by_stem
 		.into_iter()
 		.filter(|(_, paths)| paths.len() > 1)
-		.map(|(stem, mut paths)| {
+		.filter_map(|(stem, mut paths)| {
 			paths.sort_unstable();
-			issue(
+			let page_count = paths.iter().filter(|path| is_page(path)).count();
+			let severity = match profile {
+				DoctorProfile::Strict => Severity::Medium,
+				DoctorProfile::LlmWiki if page_count >= 2 => Severity::Medium,
+				DoctorProfile::LlmWiki if page_count == 1 => Severity::Low,
+				DoctorProfile::LlmWiki => return None,
+			};
+			let action = if page_count >= 2 {
+				"rename one page so wikilink stems stay unique"
+			} else {
+				"rename assets only if the shared stem is confusing"
+			};
+			Some(issue_with_severity(
 				Check::DuplicateStems,
+				severity,
 				paths[0],
 				format!("stem '{stem}' is shared by {}", paths.join(", ")),
-				"rename one file so wikilink stems stay unique",
-			)
+				action,
+			))
 		})
 		.collect()
 }
@@ -616,6 +759,35 @@ mod tests {
 	}
 
 	#[test]
+	fn llm_wiki_profile_ignores_raw_and_meta_frontmatter_policy_noise() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(dir.path().join("entities")).unwrap();
+		std::fs::create_dir_all(dir.path().join("raw")).unwrap();
+		std::fs::write(dir.path().join("entities/a.md"), "---\ntitle: A\n---\n[[b]]\n").unwrap();
+		std::fs::write(dir.path().join("entities/b.md"), "# B\n").unwrap();
+		std::fs::write(dir.path().join("entities/c.md"), "---\ntitle: C\n---\n[[a]]\n").unwrap();
+		std::fs::write(dir.path().join("entities/d.md"), "---\ntitle: D\n---\n[[a]]\n").unwrap();
+		std::fs::write(dir.path().join("raw/capture.md"), "[[P]] [[H1]] [[FIGCAPTION]]\n").unwrap();
+		std::fs::write(dir.path().join("SCHEMA.md"), "# Schema\n").unwrap();
+		std::fs::write(dir.path().join("log.md"), "# Log\n").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+
+		let default = vault.doctor(&DoctorOptions::default()).unwrap();
+		assert_eq!(issue_paths(&default, Check::BrokenLinks), Vec::<&str>::new());
+		assert_eq!(issue_paths(&default, Check::MissingFrontmatter), vec!["entities/b.md"]);
+
+		let strict = vault
+			.doctor(&DoctorOptions {
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(strict.counts["broken_links"], 3);
+		assert!(issue_paths(&strict, Check::MissingFrontmatter).contains(&"SCHEMA.md"));
+		assert!(issue_paths(&strict, Check::MissingFrontmatter).contains(&"log.md"));
+	}
+
+	#[test]
 	fn stale_pages_respect_the_stale_days_option() {
 		let (_dir, vault) = test_fixtures::knowledge_vault();
 		// stale.md is backdated 200 days: stale at the default 90 …
@@ -628,6 +800,7 @@ mod tests {
 			.doctor(&DoctorOptions {
 				stale_days: 400,
 				checks: None,
+				..Default::default()
 			})
 			.unwrap();
 		assert_eq!(relaxed.counts["stale_pages"], 0);
@@ -641,6 +814,7 @@ mod tests {
 			.doctor(&DoctorOptions {
 				stale_days: u64::MAX,
 				checks: Some(vec![Check::StalePages]),
+				..Default::default()
 			})
 			.unwrap();
 		assert_eq!(report.counts["stale_pages"], 0);
@@ -678,6 +852,35 @@ mod tests {
 		let report = vault.doctor(&DoctorOptions::default()).unwrap();
 		let dup = report.issues.iter().find(|i| i.check == Check::DuplicateStems).unwrap();
 		assert!(dup.detail.contains("TODO.md"), "got {}", dup.detail);
+	}
+
+	#[test]
+	fn llm_wiki_profile_classifies_duplicate_stems_by_page_and_asset_kind() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(dir.path().join("raw/assets")).unwrap();
+		std::fs::write(dir.path().join("page.md"), "# Page\n").unwrap();
+		std::fs::write(dir.path().join("page.png"), b"png").unwrap();
+		std::fs::write(dir.path().join("raw/assets/logo.png"), b"png").unwrap();
+		std::fs::write(dir.path().join("raw/assets/logo.svg"), b"svg").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+
+		let default = vault.doctor(&DoctorOptions::default()).unwrap();
+		let duplicates: Vec<_> = default
+			.issues
+			.iter()
+			.filter(|issue| issue.check == Check::DuplicateStems)
+			.collect();
+		assert_eq!(duplicates.len(), 1, "issues: {:?}", default.issues);
+		assert_eq!(duplicates[0].severity, Severity::Low);
+		assert!(duplicates[0].detail.contains("page.md, page.png"));
+
+		let strict = vault
+			.doctor(&DoctorOptions {
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(strict.counts["duplicate_stems"], 2);
 	}
 
 	#[test]
@@ -724,6 +927,7 @@ mod tests {
 			.doctor(&DoctorOptions {
 				stale_days: DEFAULT_STALE_DAYS,
 				checks: Some(vec![Check::BrokenLinks, Check::StalePages]),
+				..Default::default()
 			})
 			.unwrap();
 		let expected: BTreeMap<&str, usize> = [("broken_links", 1), ("stale_pages", 1)].into_iter().collect();
