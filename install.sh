@@ -60,7 +60,7 @@ if [[ -z "$local_path" && -n "$script_dir" && -f "$script_dir/crates/wikid/Cargo
 	local_path=$script_dir
 fi
 
-install_args=(install --locked)
+install_args=(install --locked --force)
 if [[ -n "$local_path" ]]; then
 	[[ -f "$local_path/crates/wikid/Cargo.toml" ]] || fail "WIKID_LOCAL_PATH is not a wikid checkout: $local_path"
 	log "installing from local checkout: $local_path"

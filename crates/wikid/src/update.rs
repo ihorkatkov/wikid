@@ -85,7 +85,11 @@ pub fn run(check: bool, force: bool, requested: Option<&str>) -> Result<UpdateRe
 			updated: false,
 			asset: None,
 		}),
-		UpdatePlan::Update { tag, asset, checksum } if check => Ok(UpdateResult {
+		UpdatePlan::Update {
+			tag,
+			asset,
+			checksum: _,
+		} if check => Ok(UpdateResult {
 			current: current.to_owned(),
 			target: tag,
 			action: UpdateAction::WouldUpdate,
