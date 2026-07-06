@@ -680,7 +680,7 @@ mod tests {
 		let (status, body) = call(&app, get_req("/v1/wikis/main/doctor")).await;
 		assert_eq!(status, StatusCode::OK);
 		let report: HealthReport = serde_json::from_value(body).unwrap();
-		assert_eq!(report.counts.len(), 8);
+		assert_eq!(report.counts.len(), 10);
 
 		let uri = "/v1/wikis/main/doctor?checks=broken_links,stale_pages&stale_days=1";
 		let (status, body) = call(&app, get_req(uri)).await;

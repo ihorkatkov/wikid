@@ -227,6 +227,35 @@ fn hex_val(byte: u8) -> Option<u8> {
 	(byte as char).to_digit(16).map(|v| v as u8)
 }
 
+/// Returns Obsidian block anchors declared as trailing `^block-id` tokens.
+///
+/// The supported grammar is intentionally pragmatic: `^` followed by one or
+/// more ASCII letters, digits, or `-`, at the end of a line after optional
+/// whitespace. Anchors inside fenced code blocks are ignored.
+pub(crate) fn block_anchors(content: &str) -> Vec<String> {
+	let mut anchors = Vec::new();
+	let mut in_code_fence = false;
+	for line in content.lines() {
+		let trimmed_start = line.trim_start();
+		if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
+			in_code_fence = !in_code_fence;
+			continue;
+		}
+		if in_code_fence {
+			continue;
+		}
+		let trimmed_end = line.trim_end();
+		let Some(caret) = trimmed_end.rfind('^') else {
+			continue;
+		};
+		let candidate = &trimmed_end[caret + 1..];
+		if !candidate.is_empty() && candidate.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+			anchors.push(candidate.to_string());
+		}
+	}
+	anchors
+}
+
 /// The resolution index: every visible file in the vault, addressable by
 /// exact path, stem or file name, or path suffix (DESIGN §4).
 pub(crate) struct LinkIndex {
@@ -470,6 +499,33 @@ mod tests {
 		assert!(links[0].embed);
 		assert_eq!(links[0].target, "Note");
 		assert_eq!(links[0].fragment.as_deref(), Some("Section"));
+	}
+
+	#[test]
+	fn wikilink_block_references_capture_fragment() {
+		let links = extract_links("See [[note#^abc123]]\n");
+		assert_eq!(links.len(), 1);
+		assert_eq!(links[0].target, "note");
+		assert_eq!(links[0].fragment.as_deref(), Some("^abc123"));
+		assert!(!links[0].embed);
+	}
+
+	#[test]
+	fn wikilink_heading_fragment_and_alias_split_correctly() {
+		let links = extract_links("See [[note#Heading|Alias]]\n");
+		assert_eq!(links.len(), 1);
+		assert_eq!(links[0].raw, "[[note#Heading|Alias]]");
+		assert_eq!(links[0].target, "note");
+		assert_eq!(links[0].fragment.as_deref(), Some("Heading"));
+		assert!(!links[0].embed);
+	}
+
+	#[test]
+	fn block_anchors_scan_trailing_tokens_outside_code_fences() {
+		let anchors = block_anchors(
+			"Some text ^abc123\nnot an ^anchor in middle of line\n- bullet ^with-dash\n```\ncode ^ignored\n```\n~~~\nmore ^ignored\n~~~\n",
+		);
+		assert_eq!(anchors, vec!["abc123", "with-dash"]);
 	}
 
 	#[test]

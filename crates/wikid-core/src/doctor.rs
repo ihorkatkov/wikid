@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WikidError;
 use crate::frontmatter::{self, Frontmatter};
-use crate::links::{ExtractedLink, LinkIndex, Resolution, extract_links};
+use crate::links::{ExtractedLink, LinkIndex, Resolution, block_anchors, extract_links};
 use crate::ops::{is_page, read_text};
 use crate::vault::Vault;
 
@@ -88,7 +88,7 @@ pub enum IssueCategory {
 	SizePerformance,
 }
 
-/// The eight structural checks, in report order.
+/// The structural checks, in report order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Check {
@@ -98,6 +98,10 @@ pub enum Check {
 	AmbiguousLinks,
 	/// A page no other page links to (root `index.md`/`README.md` excluded).
 	OrphanPages,
+	/// A `#^block-id` fragment points at a page without that block anchor.
+	BrokenBlockReference,
+	/// A `#heading` fragment points at a page without that ATX heading.
+	BrokenHeadingReference,
 	/// A page without frontmatter in a vault where most pages have it.
 	MissingFrontmatter,
 	/// A `---` block that fails to parse as YAML.
@@ -112,10 +116,12 @@ pub enum Check {
 
 impl Check {
 	/// Every check, in report order.
-	pub const ALL: [Check; 8] = [
+	pub const ALL: [Check; 10] = [
 		Check::BrokenLinks,
 		Check::AmbiguousLinks,
 		Check::OrphanPages,
+		Check::BrokenBlockReference,
+		Check::BrokenHeadingReference,
 		Check::MissingFrontmatter,
 		Check::MalformedFrontmatter,
 		Check::StalePages,
@@ -129,6 +135,8 @@ impl Check {
 			Check::BrokenLinks => "broken_links",
 			Check::AmbiguousLinks => "ambiguous_links",
 			Check::OrphanPages => "orphan_pages",
+			Check::BrokenBlockReference => "broken_block_reference",
+			Check::BrokenHeadingReference => "broken_heading_reference",
 			Check::MissingFrontmatter => "missing_frontmatter",
 			Check::MalformedFrontmatter => "malformed_frontmatter",
 			Check::StalePages => "stale_pages",
@@ -143,6 +151,8 @@ impl Check {
 			Check::BrokenLinks => Severity::High,
 			Check::AmbiguousLinks => Severity::Medium,
 			Check::OrphanPages => Severity::Low,
+			Check::BrokenBlockReference => Severity::Medium,
+			Check::BrokenHeadingReference => Severity::Medium,
 			Check::MissingFrontmatter => Severity::Low,
 			Check::MalformedFrontmatter => Severity::Medium,
 			Check::StalePages => Severity::Low,
@@ -175,7 +185,7 @@ impl std::str::FromStr for Check {
 pub struct DoctorOptions {
 	/// Pages not modified in this many days are stale.
 	pub stale_days: u64,
-	/// Which checks to run; `None` runs all eight.
+	/// Which checks to run; `None` runs all checks.
 	pub checks: Option<Vec<Check>>,
 	/// Lint policy profile.
 	#[serde(default)]
@@ -261,6 +271,8 @@ struct PageScan {
 	bytes: u64,
 	lines: usize,
 	modified: SystemTime,
+	headings: Vec<String>,
+	block_anchors: Vec<String>,
 }
 
 impl Vault {
@@ -292,25 +304,31 @@ impl Vault {
 				meta.len(),
 				text.lines().count(),
 				meta.modified()?,
+				extract_atx_headings(&text),
+				block_anchors(&text),
 			));
 		}
 		let index = LinkIndex::build(files.iter().map(|(rel, _)| rel.clone()).collect(), &aliases);
 		let pages: Vec<PageScan> = page_inputs
 			.into_iter()
-			.map(|(rel, frontmatter, extracted, bytes, lines, modified)| PageScan {
-				rel,
-				frontmatter,
-				links: extracted
-					.into_iter()
-					.map(|link| {
-						let resolution = index.resolve(&link.target);
-						(link, resolution)
-					})
-					.collect(),
-				bytes,
-				lines,
-				modified,
-			})
+			.map(
+				|(rel, frontmatter, extracted, bytes, lines, modified, headings, block_anchors)| PageScan {
+					rel,
+					frontmatter,
+					links: extracted
+						.into_iter()
+						.map(|link| {
+							let resolution = index.resolve(&link.target);
+							(link, resolution)
+						})
+						.collect(),
+					bytes,
+					lines,
+					modified,
+					headings,
+					block_anchors,
+				},
+			)
 			.collect();
 		let enabled: Vec<Check> = match &opts.checks {
 			Some(filter) => Check::ALL.iter().copied().filter(|c| filter.contains(c)).collect(),
@@ -332,6 +350,8 @@ impl Vault {
 				Check::BrokenLinks => broken_links(&scoped_pages, opts.profile),
 				Check::AmbiguousLinks => ambiguous_links(&scoped_pages),
 				Check::OrphanPages => orphan_pages(&scoped_pages),
+				Check::BrokenBlockReference => broken_block_references(&scoped_pages, &pages),
+				Check::BrokenHeadingReference => broken_heading_references(&scoped_pages, &pages),
 				Check::MissingFrontmatter => missing_frontmatter(&scoped_pages, opts.profile),
 				Check::MalformedFrontmatter => malformed_frontmatter(&scoped_pages),
 				Check::StalePages => stale_pages(&scoped_pages, opts.stale_days),
@@ -380,9 +400,12 @@ fn category_for(check: Check, path: &str) -> IssueCategory {
 		return IssueCategory::AuthoredPages;
 	}
 	match check {
-		Check::BrokenLinks | Check::AmbiguousLinks | Check::OrphanPages | Check::DuplicateStems => {
-			IssueCategory::GraphNavigation
-		}
+		Check::BrokenLinks
+		| Check::AmbiguousLinks
+		| Check::OrphanPages
+		| Check::BrokenBlockReference
+		| Check::BrokenHeadingReference
+		| Check::DuplicateStems => IssueCategory::GraphNavigation,
 		Check::StalePages | Check::OversizedPages => IssueCategory::SizePerformance,
 		Check::MissingFrontmatter | Check::MalformedFrontmatter => IssueCategory::AuthoredPages,
 	}
@@ -435,6 +458,102 @@ fn summarize(issues: &[Issue], total_pages: usize) -> String {
 		by.medium,
 		by.low
 	)
+}
+
+fn extract_atx_headings(content: &str) -> Vec<String> {
+	let mut headings = Vec::new();
+	let mut in_code_fence = false;
+	for line in content.lines() {
+		let trimmed_start = line.trim_start();
+		if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
+			in_code_fence = !in_code_fence;
+			continue;
+		}
+		if in_code_fence {
+			continue;
+		}
+		let Some(rest) = trimmed_start.strip_prefix('#') else {
+			continue;
+		};
+		let level = trimmed_start.bytes().take_while(|b| *b == b'#').count();
+		if !(1..=6).contains(&level) {
+			continue;
+		}
+		let rest = &rest[level - 1..];
+		if !rest.starts_with(char::is_whitespace) {
+			continue;
+		}
+		let heading = rest.trim().trim_end_matches('#').trim();
+		if !heading.is_empty() {
+			headings.push(heading.to_string());
+		}
+	}
+	headings
+}
+
+fn broken_block_references(source_pages: &[PageScan], target_pages: &[PageScan]) -> Vec<Issue> {
+	let targets: BTreeMap<&str, &PageScan> = target_pages.iter().map(|page| (page.rel.as_str(), page)).collect();
+	fragment_issues(source_pages, &targets, FragmentKind::Block)
+}
+
+fn broken_heading_references(source_pages: &[PageScan], target_pages: &[PageScan]) -> Vec<Issue> {
+	let targets: BTreeMap<&str, &PageScan> = target_pages.iter().map(|page| (page.rel.as_str(), page)).collect();
+	fragment_issues(source_pages, &targets, FragmentKind::Heading)
+}
+
+#[derive(Clone, Copy)]
+enum FragmentKind {
+	Block,
+	Heading,
+}
+
+fn fragment_issues(source_pages: &[PageScan], targets: &BTreeMap<&str, &PageScan>, kind: FragmentKind) -> Vec<Issue> {
+	source_pages
+		.iter()
+		.flat_map(|page| {
+			page.links.iter().filter_map(move |(link, resolution)| {
+				let Resolution::Resolved(target) = resolution else {
+					return None;
+				};
+				let fragment = link.fragment.as_deref()?;
+				let target_page = targets.get(target.as_str())?;
+				match kind {
+					FragmentKind::Block => {
+						let block_id = fragment.strip_prefix('^')?;
+						if target_page.block_anchors.iter().any(|anchor| anchor == block_id) {
+							return None;
+						}
+						Some(issue(
+							Check::BrokenBlockReference,
+							&page.rel,
+							format!("{} points to missing block ^{} in {}", link.raw, block_id, target),
+							"add the block anchor to the target page or fix the fragment",
+						))
+					}
+					FragmentKind::Heading => {
+						if fragment.starts_with('^') {
+							return None;
+						}
+						let wanted = fragment.trim();
+						if wanted.is_empty()
+							|| target_page
+								.headings
+								.iter()
+								.any(|heading| heading.trim().eq_ignore_ascii_case(wanted))
+						{
+							return None;
+						}
+						Some(issue(
+							Check::BrokenHeadingReference,
+							&page.rel,
+							format!("{} points to missing heading '{}' in {}", link.raw, wanted, target),
+							"add the heading to the target page or fix the fragment",
+						))
+					}
+				}
+			})
+		})
+		.collect()
 }
 
 fn broken_links(pages: &[PageScan], profile: DoctorProfile) -> Vec<Issue> {
@@ -678,6 +797,8 @@ mod tests {
 			("broken_links", 1),
 			("ambiguous_links", 1),
 			("orphan_pages", 3),
+			("broken_block_reference", 0),
+			("broken_heading_reference", 0),
 			("missing_frontmatter", 2),
 			("malformed_frontmatter", 1),
 			("stale_pages", 1),
@@ -728,13 +849,15 @@ mod tests {
 
 	#[test]
 	fn no_check_fires_on_a_clean_vault() {
-		// The base ops fixture is clean for seven of the eight checks; the
+		// The base ops fixture is clean for all non-orphan checks; the
 		// orphan (notes/unicode.md) is covered separately below.
 		let (_dir, vault) = test_fixtures::vault();
 		let report = vault.doctor(&DoctorOptions::default()).unwrap();
 		for check in [
 			"broken_links",
 			"ambiguous_links",
+			"broken_block_reference",
+			"broken_heading_reference",
 			"missing_frontmatter",
 			"malformed_frontmatter",
 			"stale_pages",
@@ -984,6 +1107,95 @@ mod tests {
 		assert!(issue.detail.contains("entities/acme.md, entities/other.md"));
 	}
 
+	#[test]
+	fn doctor_reports_missing_block_references() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("source.md"), "[[note#^missing]]\n").unwrap();
+		std::fs::write(dir.path().join("note.md"), "Some text ^abc\n").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenBlockReference]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(report.counts["broken_block_reference"], 1);
+		let issue = report.issues.first().unwrap();
+		assert_eq!(issue.severity, Severity::Medium);
+		assert_eq!(issue.path, "source.md");
+		assert!(issue.detail.contains("^missing"));
+	}
+
+	#[test]
+	fn doctor_accepts_existing_block_references() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("source.md"), "[[note#^abc]]\n").unwrap();
+		std::fs::write(dir.path().join("note.md"), "Some text ^abc\n").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenBlockReference]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(
+			report.counts["broken_block_reference"], 0,
+			"issues: {:?}",
+			report.issues
+		);
+	}
+
+	#[test]
+	fn doctor_reports_missing_heading_references_case_insensitively() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("source.md"), "[[note#setup]] [[note#Missing|Alias]]\n").unwrap();
+		std::fs::write(dir.path().join("note.md"), "# Note\n\n## Setup\n").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenHeadingReference]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(report.counts["broken_heading_reference"], 1);
+		let issue = report.issues.first().unwrap();
+		assert_eq!(issue.severity, Severity::Medium);
+		assert!(issue.detail.contains("Missing"));
+	}
+
+	#[test]
+	fn llm_wiki_profile_scopes_fragment_reference_sources() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(dir.path().join("entities")).unwrap();
+		std::fs::create_dir_all(dir.path().join("raw")).unwrap();
+		std::fs::write(dir.path().join("entities/source.md"), "[[target#^missing]]\n").unwrap();
+		std::fs::write(dir.path().join("raw/source.md"), "[[target#^missing]]\n").unwrap();
+		std::fs::write(dir.path().join("target.md"), "# Target\n").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let default = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenBlockReference]),
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(
+			issue_paths(&default, Check::BrokenBlockReference),
+			vec!["entities/source.md"]
+		);
+
+		let strict = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenBlockReference]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(strict.counts["broken_block_reference"], 2);
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn doctor_surfaces_unreadable_pages_as_io_errors() {
@@ -1039,7 +1251,7 @@ mod tests {
 		let vault = Vault::open(dir.path()).unwrap();
 		let report = vault.doctor(&DoctorOptions::default()).unwrap();
 		assert!(report.issues.is_empty());
-		assert_eq!(report.counts.len(), 8);
+		assert_eq!(report.counts.len(), 10);
 		assert_eq!(report.summary, "no issues across 0 pages");
 	}
 
