@@ -1239,6 +1239,16 @@ fn skills_are_client_side_and_json_shapes_are_stable() {
 	assert_eq!(get["full"], false);
 	assert!(get["content"].as_str().unwrap().starts_with("---\nname: wikid-core\n"));
 
+	let body = include_str!("../../../skills/core/SKILL.md");
+	let output = wikid_untargeted()
+		.arg("skills")
+		.arg("get")
+		.arg("core")
+		.output()
+		.expect("run wikid");
+	assert!(output.status.success());
+	assert_eq!(output.stdout, body.as_bytes());
+
 	let full = stdout_of(wikid_untargeted().arg("skills").arg("get").arg("core").arg("--full"));
 	assert!(full.contains("# Reference: json-shapes"));
 	assert!(full.contains("# Reference: doctor-checks"));

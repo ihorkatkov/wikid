@@ -74,8 +74,8 @@ Structural only — no LLM, no semantics:
 - oversized pages (should-split hint)
 - duplicate titles / conflicting filenames
 
-Default profile: `llm-wiki`. It bakes in the original LLM Wiki directory convention while remaining explicit and overridable by `--profile strict`:
-- authored pages: `entities/`, `concepts/`, `queries/`, `meetings/`
+Default profile: `llm-wiki`. It bakes in the scaffolded LLM Wiki directory convention plus legacy authored directories while remaining explicit and overridable by `--profile strict`:
+- authored pages: `entities/`, `concepts/`, `questions/`, `syntheses/`, `queries/`, `meetings/`
 - raw captures: `raw/**`
 - assets: `raw/assets/**`
 - root meta pages: `SCHEMA.md`, `index.md`, `log.md`

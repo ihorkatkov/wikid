@@ -454,9 +454,16 @@ fn is_llm_wiki_linted_page(path: &str) -> bool {
 }
 
 fn is_authored_page(path: &str) -> bool {
-	["entities/", "concepts/", "queries/", "meetings/"]
-		.iter()
-		.any(|prefix| path.starts_with(prefix))
+	[
+		"entities/",
+		"concepts/",
+		"questions/",
+		"syntheses/",
+		"queries/",
+		"meetings/",
+	]
+	.iter()
+	.any(|prefix| path.starts_with(prefix))
 }
 
 fn is_source_capture_wikilink(target: &str) -> bool {
@@ -1016,6 +1023,23 @@ mod tests {
 		let vault = Vault::open(dir.path()).unwrap();
 		let report = vault.doctor(&DoctorOptions::default()).unwrap();
 		assert_eq!(issue_paths(&report, Check::MissingFrontmatter), vec!["c.md", "d.md"]);
+	}
+
+	#[test]
+	fn llm_wiki_profile_reports_broken_links_in_scaffold_questions() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::create_dir_all(dir.path().join("questions")).unwrap();
+		std::fs::write(
+			dir.path().join("questions/refunds.md"),
+			"# Refunds\n\n[[missing-answer]]\n",
+		)
+		.unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+
+		let report = vault.doctor(&DoctorOptions::default()).unwrap();
+
+		assert_eq!(report.counts["broken_links"], 1, "issues: {:?}", report.issues);
+		assert_eq!(issue_paths(&report, Check::BrokenLinks), vec!["questions/refunds.md"]);
 	}
 
 	#[test]

@@ -117,13 +117,13 @@ pub fn document(doc: &Document) -> String {
 	lines.join("\n")
 }
 
-pub fn grep(result: &GrepResult, pattern: &str, files_only: bool) -> String {
+pub fn grep(result: &GrepResult, pattern: &str, files_only: bool, ignore_case: bool) -> String {
 	if result.total_matches == 0 {
-		return [
-			format!("no matches for \"{pattern}\" in {} files", result.total_files),
-			"hint: wikid grep <pattern> -i — retry case-insensitively".to_string(),
-		]
-		.join("\n");
+		let mut lines = vec![format!("no matches for \"{pattern}\" in {} files", result.total_files)];
+		if !ignore_case {
+			lines.push("hint: wikid grep <pattern> -i — retry case-insensitively".to_string());
+		}
+		return lines.join("\n");
 	}
 	let mut lines = Vec::new();
 	for hit in &result.matches {
@@ -418,8 +418,21 @@ mod tests {
 			total_files: 7,
 			truncated: false,
 		};
-		let out = grep(&result, "needle", false);
+		let out = grep(&result, "needle", false, false);
 		assert!(out.starts_with("no matches for \"needle\" in 7 files"), "{out}");
+	}
+
+	#[test]
+	fn grep_zero_matches_omits_case_hint_when_already_case_insensitive() {
+		let result = GrepResult {
+			matches: vec![],
+			total_matches: 0,
+			matched_files: 0,
+			total_files: 7,
+			truncated: false,
+		};
+		let out = grep(&result, "needle", false, true);
+		assert_eq!(out, "no matches for \"needle\" in 7 files");
 	}
 
 	#[test]
@@ -438,7 +451,7 @@ mod tests {
 			total_files: 17,
 			truncated: false,
 		};
-		let out = grep(&result, "x", false);
+		let out = grep(&result, "x", false, false);
 		assert!(out.contains("total: 1 match in 1 file (17 searched)"), "{out}");
 		let result = GrepResult {
 			matches: vec![hit.clone(), hit],
@@ -447,7 +460,7 @@ mod tests {
 			total_files: 17,
 			truncated: false,
 		};
-		let out = grep(&result, "x", false);
+		let out = grep(&result, "x", false, false);
 		assert!(out.contains("total: 2 matches in 2 files (17 searched)"), "{out}");
 	}
 
@@ -466,7 +479,7 @@ mod tests {
 			total_files: 3,
 			truncated: true,
 		};
-		let out = grep(&result, "x", false);
+		let out = grep(&result, "x", false, false);
 		assert!(
 			out.contains("total: 9 matches in 2 files (3 searched) (showing first 1) — use --limit <n>"),
 			"{out}"

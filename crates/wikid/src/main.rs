@@ -246,7 +246,14 @@ fn main() {
 
 fn write_stdout(text: &str, code: i32) -> ! {
 	let mut stdout = std::io::stdout().lock();
-	if let Err(err) = writeln!(stdout, "{text}") {
+	let write_result = (|| -> std::io::Result<()> {
+		stdout.write_all(text.as_bytes())?;
+		if !text.ends_with('\n') {
+			stdout.write_all(b"\n")?;
+		}
+		Ok(())
+	})();
+	if let Err(err) = write_result {
 		if err.kind() == std::io::ErrorKind::BrokenPipe {
 			std::process::exit(0);
 		}
@@ -965,7 +972,9 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 			let result = backend.grep(&pattern, &opts)?;
 			let code = if result.total_matches == 0 { 1 } else { 0 };
 			Ok(Outcome {
-				text: emit(json, &result, || render::grep(&result, &pattern, files_only)),
+				text: emit(json, &result, || {
+					render::grep(&result, &pattern, files_only, ignore_case)
+				}),
 				code,
 			})
 		}

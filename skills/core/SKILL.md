@@ -106,6 +106,14 @@ Replace one line:
 wikid edit concepts/billing.md --line 11 --hash 4a239f71a2cc --new='Refunds are approved by support using the refund checklist.'
 ```
 
+To insert lines, replace the existing line with itself plus embedded newlines. This is the default insertion idiom:
+
+```sh
+wikid edit concepts/billing.md --line 11 --hash 4a239f71a2cc --new=$'Refunds are approved by support.\n- New checklist item.'
+```
+
+Use the same embedded-newline pattern in `edit-batch` with `new_text`.
+
 Successful output:
 
 ```text
@@ -207,6 +215,15 @@ After creating, moving, removing, or batch-editing pages, run doctor:
 wikid doctor
 ```
 
+Move pages with `mv`; remove pages with `rm` after confirming with `--force`:
+
+```sh
+wikid mv concepts/old.md concepts/new.md
+wikid rm concepts/obsolete.md --force
+```
+
+`wikid rm page.md` refuses without `--force`. `mv` does not rewrite existing links. Follow moves with `wikid doctor --checks broken_links`, then fix any links it reports.
+
 Read structured errors and findings literally. Human errors look like this:
 
 ```text
@@ -234,4 +251,10 @@ Run the full reference when exact JSON fields, doctor checks, or link-resolution
 wikid skills get core --full
 ```
 
-If this skill was materialized with `wikid skills path`, reference files also exist under `references/`; otherwise `wikid skills get core --full` appends them after this body.
+If this skill was materialized with `wikid skills path`, reference files also exist under `references/`. Otherwise, `wikid skills get core --full` appends them after this body.
+
+Reference files:
+
+- `references/json-shapes.md` — exact `--json` fields per command.
+- `references/doctor-checks.md` — every doctor check, severity, and scope.
+- `references/link-resolution.md` — wikilink and Markdown-path resolution precedence.

@@ -30,6 +30,8 @@ index.md
 log.md
 concepts/**
 entities/**
+questions/**
+syntheses/**
 queries/**
 meetings/**
 ```
@@ -39,8 +41,6 @@ Raw captures, assets, generated exports, and other non-authored subtrees are exc
 ```sh
 wikid doctor --profile strict
 ```
-
-The scaffold created by `wikid init` uses `questions/` and `syntheses/` for authored pages; doctor keeps its historical authored scope and still reports graph and file hygiene findings that affect linked pages.
 
 ## Issue fields
 

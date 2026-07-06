@@ -41,7 +41,7 @@ After creating or changing a page, add a short index entry under the best sectio
 - [[concepts/refund-policy.md]] — support-owned refund rules and finance escalation points.
 ```
 
-If no section fits, add one. Keep the index navigable; do not turn it into a transcript.
+When inserting index or log entries, use the core edit idiom: replace the anchor line with itself plus embedded newlines in `--new` or `new_text`. If no section fits, add one. Keep the index navigable; do not turn it into a transcript.
 
 ## 3. Maintain log.md newest-first
 
