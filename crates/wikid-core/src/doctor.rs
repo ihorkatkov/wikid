@@ -324,21 +324,24 @@ impl Vault {
 		let pages: Vec<PageScan> = page_inputs
 			.into_iter()
 			.map(
-				|(rel, frontmatter, extracted, bytes, lines, modified, headings, block_anchors)| PageScan {
-					rel,
-					frontmatter,
-					links: extracted
+				|(rel, frontmatter, extracted, bytes, lines, modified, headings, block_anchors)| {
+					let links = extracted
 						.into_iter()
 						.map(|link| {
-							let resolution = index.resolve(&link.target);
+							let resolution = index.resolve_from(&rel, &link);
 							(link, resolution)
 						})
-						.collect(),
-					bytes,
-					lines,
-					modified,
-					headings,
-					block_anchors,
+						.collect();
+					PageScan {
+						rel,
+						frontmatter,
+						links,
+						bytes,
+						lines,
+						modified,
+						headings,
+						block_anchors,
+					}
 				},
 			)
 			.collect();
@@ -1191,6 +1194,28 @@ mod tests {
 	}
 
 	#[test]
+	fn doctor_uses_obsidian_markdown_path_modes_for_broken_links() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault.write("Home.md", "# Home\n").unwrap();
+		vault.write("Sibling.md", "# Root sibling\n").unwrap();
+		vault.write("Sub/Child.md", "[a](../Home.md)\n").unwrap();
+		vault.write("Sub/Sibling.md", "# Sub sibling\n").unwrap();
+		vault.write("Sub/P1.md", "[a](Sibling.md)\n").unwrap();
+		vault.write("Sub/P2.md", "[a](./Sibling.md)\n").unwrap();
+		vault.write("Sub/P3.md", "[a](/Sibling.md)\n").unwrap();
+		vault.write("Sub/Escape.md", "[a](../../Home.md)\n").unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenLinks]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(report.counts["broken_links"], 1, "issues: {:?}", report.issues);
+		assert_eq!(report.issues[0].path, "Sub/Escape.md");
+	}
+
+	#[test]
 	fn malformed_frontmatter_detail_is_sanitized() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::write(dir.path().join("bad.md"), "---\ntitle: [bad\n---\n# Bad\n").unwrap();
@@ -1297,6 +1322,60 @@ mod tests {
 			"issues: {:?}",
 			report.issues
 		);
+	}
+
+	#[test]
+	fn doctor_validates_fragment_only_wikilinks_against_containing_page() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(
+			dir.path().join("source.md"),
+			"# Child Section\n\n[[#Child Section]] [[#Missing]] ![[#^block]] ![[#^absent]]\nanchor ^block\n",
+		)
+		.unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenHeadingReference, Check::BrokenBlockReference]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(
+			report.counts["broken_heading_reference"], 1,
+			"issues: {:?}",
+			report.issues
+		);
+		assert_eq!(
+			report.counts["broken_block_reference"], 1,
+			"issues: {:?}",
+			report.issues
+		);
+		assert!(report.issues.iter().any(|issue| issue.detail.contains("Missing")));
+		assert!(report.issues.iter().any(|issue| issue.detail.contains("^absent")));
+	}
+
+	#[test]
+	fn doctor_accepts_fragment_only_nested_heading_final_segment() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(
+			dir.path().join("source.md"),
+			"# Top\n\n## Sub\n\n[[#Top#Sub]] [[#Top#Missing]]\n",
+		)
+		.unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenHeadingReference]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(
+			report.counts["broken_heading_reference"], 1,
+			"issues: {:?}",
+			report.issues
+		);
+		assert!(report.issues[0].detail.contains("Missing"));
 	}
 
 	#[test]

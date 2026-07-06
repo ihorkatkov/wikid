@@ -21,7 +21,7 @@ use crate::vault::Vault;
 pub struct TagSummary {
 	/// Tag text without a leading `#`, preserving the first authored casing.
 	pub tag: String,
-	/// Number of pages carrying this tag.
+	/// Number of authored occurrences carrying this tag, including implied nested-tag parents.
 	pub count: usize,
 	/// Pages carrying this tag, sorted by vault-relative path.
 	pub pages: Vec<String>,
@@ -130,15 +130,19 @@ impl Vault {
 			}
 			let Some(text) = read_text(&abs)? else { continue };
 			let frontmatter = crate::frontmatter::parse(&text);
-			for tag in page_tags(&frontmatter, &text) {
-				let key = tag.to_lowercase();
-				let entry = by_key.entry(key).or_insert_with(|| TagSummary {
-					tag,
-					count: 0,
-					pages: Vec::new(),
-				});
-				entry.count += 1;
-				entry.pages.push(rel.clone());
+			for tag in frontmatter_tags(&frontmatter).into_iter().chain(extract_tags(&text)) {
+				for expanded in tag_ancestors(&tag) {
+					let key = expanded.to_lowercase();
+					let entry = by_key.entry(key).or_insert_with(|| TagSummary {
+						tag: expanded,
+						count: 0,
+						pages: Vec::new(),
+					});
+					entry.count += 1;
+					if !entry.pages.contains(&rel) {
+						entry.pages.push(rel.clone());
+					}
+				}
 			}
 		}
 		Ok(TagReport {
@@ -150,6 +154,14 @@ impl Vault {
 fn normalize_tag(tag: &str) -> Option<String> {
 	let tag = tag.trim().trim_start_matches('#').trim();
 	(!tag.is_empty()).then(|| tag.to_string())
+}
+
+fn tag_ancestors(tag: &str) -> Vec<String> {
+	if tag.split('/').any(str::is_empty) {
+		return vec![tag.to_string()];
+	}
+	let parts: Vec<&str> = tag.split('/').collect();
+	(1..=parts.len()).map(|end| parts[..end].join("/")).collect()
 }
 
 fn body_start(content: &str) -> usize {
@@ -277,15 +289,41 @@ mod tests {
 	}
 
 	#[test]
-	fn vault_report_counts_pages() {
+	fn vault_report_counts_occurrences_and_keeps_page_unions() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::write(dir.path().join("a.md"), "---\ntags: [Alpha]\n---\n\n#beta\n").unwrap();
-		std::fs::write(dir.path().join("b.md"), "#alpha #gamma\n").unwrap();
+		std::fs::write(dir.path().join("b.md"), "#alpha #alpha #gamma\n").unwrap();
 		let report = Vault::open(dir.path()).unwrap().tags().unwrap();
 		assert_eq!(report.tags[0].tag, "Alpha");
-		assert_eq!(report.tags[0].count, 2);
+		assert_eq!(report.tags[0].count, 3);
 		assert_eq!(report.tags[0].pages, vec!["a.md", "b.md"]);
 		assert_eq!(report.tags[1].tag, "beta");
 		assert_eq!(report.tags[1].pages, vec!["a.md"]);
+	}
+
+	#[test]
+	fn nested_tags_imply_parent_tags_with_aggregate_counts() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(
+			dir.path().join("Home.md"),
+			"---\ntags: [home]\n---\n\n#project/wikid #work #callout-tag\n",
+		)
+		.unwrap();
+		std::fs::write(dir.path().join("Beta.md"), "---\ntags: work\n---\n\n#work\n").unwrap();
+		let report = Vault::open(dir.path()).unwrap().tags().unwrap();
+		let counts: BTreeMap<&str, usize> = report
+			.tags
+			.iter()
+			.map(|summary| (summary.tag.as_str(), summary.count))
+			.collect();
+		assert_eq!(counts["callout-tag"], 1);
+		assert_eq!(counts["home"], 1);
+		assert_eq!(counts["project"], 1);
+		assert_eq!(counts["project/wikid"], 1);
+		assert_eq!(counts["work"], 3);
+		let project = report.tags.iter().find(|summary| summary.tag == "project").unwrap();
+		assert_eq!(project.pages, vec!["Home.md"]);
+		let work = report.tags.iter().find(|summary| summary.tag == "work").unwrap();
+		assert_eq!(work.pages, vec!["Beta.md", "Home.md"]);
 	}
 }

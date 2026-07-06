@@ -162,7 +162,7 @@ enum Command {
 	},
 	/// Show links/backlinks; #Heading/#^block-id fragments kept; ![[...]] has embed=true
 	Links { path: String },
-	/// List inline and frontmatter tags across the vault
+	/// List inline and frontmatter tags, counting occurrences across the vault
 	Tags,
 	/// Run structural health checks
 	Doctor {

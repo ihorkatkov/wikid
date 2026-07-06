@@ -264,14 +264,17 @@ pub fn tags(report: &TagReport) -> String {
 		lines.push("no tags found".to_string());
 	} else {
 		for tag in &report.tags {
-			let page_word = if tag.count == 1 { "page" } else { "pages" };
+			let occurrence_word = if tag.count == 1 { "occurrence" } else { "occurrences" };
 			let preview = tag.pages.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
 			let suffix = if tag.pages.len() > 3 {
 				format!(", … {} more", tag.pages.len() - 3)
 			} else {
 				String::new()
 			};
-			lines.push(format!("#{}  {} {page_word}  {preview}{suffix}", tag.tag, tag.count));
+			lines.push(format!(
+				"#{}  {} {occurrence_word}  {preview}{suffix}",
+				tag.tag, tag.count
+			));
 		}
 	}
 	lines.push("hint: wikid grep '#tag' — inspect a tag's source context".to_string());

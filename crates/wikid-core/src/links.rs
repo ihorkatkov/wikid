@@ -95,8 +95,9 @@ fn markdown_re() -> &'static regex::Regex {
 }
 
 /// Extracts every wikilink and markdown link from `content`, in document
-/// order. External targets (`http://`, `https://`, `mailto:`) and pure
-/// anchors (`#heading`, `[[#heading]]`) are skipped.
+/// order. External markdown targets (`http://`, `https://`, `mailto:`) and
+/// pure markdown anchors (`#heading`) are skipped. Fragment-only wikilinks are
+/// kept as self-links whose target is empty and whose fragment is populated.
 pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 	let mut found: Vec<(usize, ExtractedLink)> = Vec::new();
 	let mut fences = FenceTracker::new();
@@ -125,7 +126,7 @@ fn extract_line_links(line: &str, offset: usize, found: &mut Vec<(usize, Extract
 		let target = inner.split('|').next().unwrap_or(inner);
 		let (target, fragment) = split_fragment(target);
 		let target = target.trim();
-		if target.is_empty() {
+		if target.is_empty() && fragment.is_none() {
 			continue;
 		}
 		found.push((
@@ -151,16 +152,12 @@ fn extract_line_links(line: &str, offset: usize, found: &mut Vec<(usize, Extract
 			.strip_prefix('<')
 			.and_then(|s| s.strip_suffix('>'))
 			.unwrap_or(inner);
-		if inner.starts_with("http://")
-			|| inner.starts_with("https://")
-			|| inner.starts_with("mailto:")
-			|| inner.starts_with('/')
-		{
+		if inner.starts_with("http://") || inner.starts_with("https://") || inner.starts_with("mailto:") {
 			continue;
 		}
 		let (target, fragment) = split_fragment(inner);
 		let target = target.trim();
-		if target.is_empty() || target.starts_with('/') {
+		if target.is_empty() {
 			continue;
 		}
 		found.push((
@@ -335,12 +332,8 @@ impl LinkIndex {
 			return Resolution::Broken;
 		};
 		let rel = components.join("/");
-		if self.files.contains(&rel) {
-			return Resolution::Resolved(rel);
-		}
-		let with_md = format!("{rel}.md");
-		if self.files.contains(&with_md) {
-			return Resolution::Resolved(with_md);
+		if let Some(resolved) = self.resolve_exact_rel(&rel) {
+			return Resolution::Resolved(resolved);
 		}
 		if let Some(configured_attachment) = self.configured_attachment_candidate(&rel) {
 			return Resolution::Resolved(configured_attachment);
@@ -370,6 +363,45 @@ impl LinkIndex {
 			return decide(candidates);
 		}
 		decide(self.alias_candidates(&rel))
+	}
+
+	pub(crate) fn resolve_from(&self, source: &str, link: &ExtractedLink) -> Resolution {
+		if link.kind == LinkKind::Wikilink && link.target.is_empty() {
+			return Resolution::Resolved(source.to_string());
+		}
+		if link.kind != LinkKind::Markdown {
+			return self.resolve(&link.target);
+		}
+		if let Some(root_relative) = link.target.strip_prefix('/') {
+			return self.resolve_normalized_exact(root_relative);
+		}
+		if link.target.starts_with("./") || link.target.starts_with("../") {
+			let source_dir = source.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+			let candidate = if source_dir.is_empty() {
+				link.target.clone()
+			} else {
+				format!("{source_dir}/{}", link.target)
+			};
+			return self.resolve_normalized_exact(&candidate);
+		}
+		self.resolve(&link.target)
+	}
+
+	fn resolve_normalized_exact(&self, target: &str) -> Resolution {
+		let Ok(components) = paths::normalize(target) else {
+			return Resolution::Broken;
+		};
+		self.resolve_exact_rel(&components.join("/"))
+			.map(Resolution::Resolved)
+			.unwrap_or(Resolution::Broken)
+	}
+
+	fn resolve_exact_rel(&self, rel: &str) -> Option<String> {
+		if self.files.contains(&rel.to_string()) {
+			return Some(rel.to_string());
+		}
+		let with_md = format!("{rel}.md");
+		self.files.contains(&with_md).then_some(with_md)
 	}
 
 	fn alias_candidates(&self, rel: &str) -> Vec<String> {
@@ -447,7 +479,7 @@ impl Vault {
 				outgoing = extracted
 					.into_iter()
 					.map(|link| {
-						let resolved = match index.resolve(&link.target) {
+						let resolved = match index.resolve_from(&rel, &link) {
 							Resolution::Resolved(p) => Some(p),
 							_ => None,
 						};
@@ -463,7 +495,7 @@ impl Vault {
 					.collect();
 			} else if extracted
 				.iter()
-				.any(|l| matches!(index.resolve(&l.target), Resolution::Resolved(p) if p == target.rel))
+				.any(|l| matches!(index.resolve_from(&rel, l), Resolution::Resolved(p) if p == target.rel))
 			{
 				backlinks.push(rel);
 			}
@@ -497,21 +529,25 @@ mod tests {
 	}
 
 	#[test]
-	fn extracts_markdown_links_and_skips_external_and_anchors() {
+	fn extracts_markdown_links_and_skips_external_and_markdown_anchors() {
 		let links = extract_links(
 			"[guide](notes/guide.md) ![img](img/logo.png) [w](https://e.com) \
 			 [h](http://e.com) [m](mailto:a@b.c) [root](/docs/page) [a](#top) [[#heading]] [b](<my file.md>)\n",
 		);
-		let targets: Vec<(&str, &str)> = links.iter().map(|l| (l.raw.as_str(), l.target.as_str())).collect();
+		let targets: Vec<(&str, &str, LinkKind)> = links
+			.iter()
+			.map(|l| (l.raw.as_str(), l.target.as_str(), l.kind))
+			.collect();
 		assert_eq!(
 			targets,
 			vec![
-				("[guide](notes/guide.md)", "notes/guide.md"),
-				("![img](img/logo.png)", "img/logo.png"),
-				("[b](<my file.md>)", "my file.md"),
+				("[guide](notes/guide.md)", "notes/guide.md", LinkKind::Markdown),
+				("![img](img/logo.png)", "img/logo.png", LinkKind::Markdown),
+				("[root](/docs/page)", "/docs/page", LinkKind::Markdown),
+				("[[#heading]]", "", LinkKind::Wikilink),
+				("[b](<my file.md>)", "my file.md", LinkKind::Markdown),
 			]
 		);
-		assert!(links.iter().all(|l| l.kind == LinkKind::Markdown));
 	}
 
 	#[test]
@@ -697,6 +733,30 @@ mod tests {
 		assert_eq!(back.backlinks, vec!["linker.md"]);
 	}
 
+	#[test]
+	fn fragment_only_wikilinks_are_extracted_as_self_targets() {
+		let links = extract_links("[[#Child Section]] ![[#^block]] [[#A#B]]\n");
+		let targets: Vec<(&str, &str, Option<&str>, bool)> = links
+			.iter()
+			.map(|link| {
+				(
+					link.raw.as_str(),
+					link.target.as_str(),
+					link.fragment.as_deref(),
+					link.embed,
+				)
+			})
+			.collect();
+		assert_eq!(
+			targets,
+			vec![
+				("[[#Child Section]]", "", Some("Child Section"), false),
+				("![[#^block]]", "", Some("^block"), true),
+				("[[#A#B]]", "", Some("A#B"), false),
+			]
+		);
+	}
+
 	// --- resolution order ---
 
 	fn index(files: &[&str]) -> LinkIndex {
@@ -849,6 +909,62 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn markdown_dot_relative_targets_resolve_from_source_directory() {
+		let idx = index(&["Home.md", "Sibling.md", "Sub/Child.md", "Sub/Sibling.md"]);
+		let up = ExtractedLink {
+			raw: "[a](../Home.md)".into(),
+			target: "../Home.md".into(),
+			kind: LinkKind::Markdown,
+			embed: false,
+			fragment: None,
+		};
+		let same_dir = ExtractedLink {
+			raw: "[a](./Sibling.md)".into(),
+			target: "./Sibling.md".into(),
+			kind: LinkKind::Markdown,
+			embed: false,
+			fragment: None,
+		};
+		assert_eq!(
+			idx.resolve_from("Sub/Child.md", &up),
+			Resolution::Resolved("Home.md".into())
+		);
+		assert_eq!(
+			idx.resolve_from("Sub/P2.md", &same_dir),
+			Resolution::Resolved("Sub/Sibling.md".into())
+		);
+	}
+
+	#[test]
+	fn markdown_root_absolute_targets_resolve_from_vault_root() {
+		let idx = index(&["Sibling.md", "Sub/Sibling.md", "Sub/P3.md"]);
+		let link = ExtractedLink {
+			raw: "[a](/Sibling.md)".into(),
+			target: "/Sibling.md".into(),
+			kind: LinkKind::Markdown,
+			embed: false,
+			fragment: None,
+		};
+		assert_eq!(
+			idx.resolve_from("Sub/P3.md", &link),
+			Resolution::Resolved("Sibling.md".into())
+		);
+	}
+
+	#[test]
+	fn markdown_relative_escape_above_vault_is_broken() {
+		let idx = index(&["Home.md", "Sub/Child.md"]);
+		let link = ExtractedLink {
+			raw: "[a](../../Home.md)".into(),
+			target: "../../Home.md".into(),
+			kind: LinkKind::Markdown,
+			embed: false,
+			fragment: None,
+		};
+		assert_eq!(idx.resolve_from("Sub/Child.md", &link), Resolution::Broken);
+	}
+
 	// --- Vault::links ---
 
 	#[test]
@@ -955,6 +1071,53 @@ mod tests {
 		let report = vault.links("page.md").unwrap();
 		assert_eq!(report.outgoing.len(), 1);
 		assert_eq!(report.outgoing[0].resolved.as_deref(), Some("assets/logo.png"));
+	}
+
+	#[test]
+	fn vault_links_apply_obsidian_markdown_path_modes() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault.write("Home.md", "# Home\n").unwrap();
+		vault.write("Sibling.md", "# Root sibling\n").unwrap();
+		vault.write("Sub/Child.md", "[a](../Home.md)\n").unwrap();
+		vault.write("Sub/Sibling.md", "# Sub sibling\n").unwrap();
+		vault.write("Sub/P1.md", "[a](Sibling.md)\n").unwrap();
+		vault.write("Sub/P2.md", "[a](./Sibling.md)\n").unwrap();
+		vault.write("Sub/P3.md", "[a](/Sibling.md)\n").unwrap();
+
+		assert_eq!(
+			vault.links("Sub/Child.md").unwrap().outgoing[0].resolved.as_deref(),
+			Some("Home.md")
+		);
+		assert_eq!(
+			vault.links("Sub/P2.md").unwrap().outgoing[0].resolved.as_deref(),
+			Some("Sub/Sibling.md")
+		);
+		assert_eq!(
+			vault.links("Sub/P3.md").unwrap().outgoing[0].resolved.as_deref(),
+			Some("Sibling.md")
+		);
+		assert_eq!(
+			vault.links("Sub/P1.md").unwrap().outgoing[0].resolved.as_deref(),
+			Some("Sibling.md")
+		);
+		assert_eq!(vault.links("Home.md").unwrap().backlinks, vec!["Sub/Child.md"]);
+	}
+
+	#[test]
+	fn fragment_only_wikilinks_resolve_to_the_containing_page() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault
+			.write(
+				"Sub/Child.md",
+				"# Child Section\n\nSee [[#Child Section]] and ![[#^block]]\nanchor ^block\n",
+			)
+			.unwrap();
+		let report = vault.links("Sub/Child.md").unwrap();
+		let resolved: Vec<Option<&str>> = report.outgoing.iter().map(|link| link.resolved.as_deref()).collect();
+		assert_eq!(resolved, vec![Some("Sub/Child.md"), Some("Sub/Child.md")]);
+		assert_eq!(report.outgoing[0].target, "");
+		assert_eq!(report.outgoing[0].fragment.as_deref(), Some("Child Section"));
+		assert!(report.outgoing[1].embed);
 	}
 
 	#[test]
