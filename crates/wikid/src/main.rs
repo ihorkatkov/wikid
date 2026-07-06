@@ -16,8 +16,8 @@ use clap::{CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use wikid_core::{
 	Check, DoctorOptions, DoctorProfile, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult,
-	HealthReport, LineEdit, LinkReport, Listing, MvResult, ReadLimit, ReadRange, RmResult, Vault, VaultStatus,
-	WriteResult,
+	HealthReport, LineEdit, LinkReport, Listing, MvResult, ReadLimit, ReadRange, RmResult, TagReport, Vault,
+	VaultStatus, WriteResult,
 };
 
 use crate::error::CliError;
@@ -162,6 +162,8 @@ enum Command {
 	},
 	/// Show outgoing links and backlinks for a page
 	Links { path: String },
+	/// List tags across the vault
+	Tags,
 	/// Run structural health checks
 	Doctor {
 		/// Pages not modified in this many days are stale (default 90)
@@ -819,6 +821,13 @@ impl Backend {
 		}
 	}
 
+	fn tags(&self) -> Result<TagReport, CliError> {
+		match self {
+			Self::Local(vault) => Ok(vault.tags()?),
+			Self::Remote(remote) => remote.tags(),
+		}
+	}
+
 	fn doctor(
 		&self,
 		stale_days: Option<u64>,
@@ -935,6 +944,10 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 		Command::Links { path } => {
 			let report = backend.links(&path)?;
 			Ok(Outcome::ok(emit(json, &report, || render::links(&report))))
+		}
+		Command::Tags => {
+			let report = backend.tags()?;
+			Ok(Outcome::ok(emit(json, &report, || render::tags(&report))))
 		}
 		Command::Doctor {
 			stale_days,

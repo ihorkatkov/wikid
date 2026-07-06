@@ -32,7 +32,8 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 | `edit(path, edits: &[LineEdit])` | Hash-guarded line replacement (`LineEdit { line, expected_hash, new_text }`, 1-based lines). Structural problems (empty batch, out-of-range line, duplicate line) → `BadEdit`. Every `expected_hash` must match the current line's hash (comparison is ASCII-case-insensitive); any mismatch → `StaleEdit` naming every stale line, and the whole batch is refused — all-or-nothing. `new_text` may contain `\n` (one line expands into many). EOL style (LF/CRLF) and trailing-newline presence are preserved. Write is atomic as above; returns `{path, replacements, bytes}` where `replacements` counts lines replaced. CLI exposes single-line `edit` and JSON-stdin `edit-batch`; both call this same method. |
 | `mv(from, to, force)` | Rename file (not dirs). Creates parent dirs at destination. Destination exists and `!force` → `AlreadyExists`. |
 | `rm(path)` | Delete file (not dirs). The `--force` gate is CLI/HTTP-level, not core. |
-| `links(path)` | `LinkReport { outgoing: [{raw, target, resolved: Option<path>, kind: wikilink/markdown}], backlinks: [path] }`. Backlinks = scan all pages for links resolving to `path`. |
+| `links(path)` | `LinkReport { outgoing: [{raw, target, resolved: Option<path>, kind: wikilink/markdown, embed: bool, fragment?}], backlinks: [path] }`. Backlinks = scan all pages for links resolving to `path`. |
+| `tags()` | `TagReport { tags: [{tag, count, pages}] }` across visible Markdown pages. Inline tags use Obsidian's `#tag` grammar (letters/digits/`_`/`-`/`/`, not preceded by a word char), excluding wikilink fragments, ATX headings, fenced code blocks, inline code spans, and numeric-only tags. Frontmatter `tags` accepts a string or list; leading `#` is stripped; dedupe is case-insensitive while preserving first-authored case. |
 | `doctor(opts)` | See §5. |
 | `status()` | `VaultStatus { version, root, total_pages, total_files, total_bytes, recent: [{path, modified}] (5 most recent pages), doctor_summary: {high, medium, low} }`. |
 
@@ -93,6 +94,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), categor
 - `mv <from> <to>` `--force`
 - `rm <path> --force`
 - `links <path>`
+- `tags`
 - `doctor` `--stale-days <n>` `--checks <a,b,c>` `--profile <llm-wiki|strict>`
 - `serve` `--config <path>` (discovery: `--config` → `$WIKID_CONFIG` → `./wikid.toml` → `~/.config/wikid/config.toml`; write target for bootstrap/mutation: explicit/env path even if absent, else existing `./wikid.toml`, else global config)
 
@@ -108,6 +110,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), categor
   - `GET  /v1/wikis/{wiki}/grep?pattern=&ignore_case=&files_only=&context=&limit=`
   - `GET  /v1/wikis/{wiki}/glob?pattern=`
   - `GET  /v1/wikis/{wiki}/links?path=`
+  - `GET  /v1/wikis/{wiki}/tags`
   - `GET  /v1/wikis/{wiki}/doctor?stale_days=&checks=&profile=`
   - `PUT  /v1/wikis/{wiki}/pages` body `{path, content}`
   - `POST /v1/wikis/{wiki}/edit` body `{path, edits: [{line, expected_hash, new_text}]}`

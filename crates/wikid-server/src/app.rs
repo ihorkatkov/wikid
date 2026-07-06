@@ -16,7 +16,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use wikid_core::{
 	Check, DoctorOptions, DoctorProfile, EditResult, GlobResult, GrepOptions, GrepResult, HealthReport, LineEdit,
-	LinkReport, Listing, MvResult, ReadLimit, ReadRange, RmResult, Vault, VaultStatus, WikidError, WriteResult,
+	LinkReport, Listing, MvResult, ReadLimit, ReadRange, RmResult, TagReport, Vault, VaultStatus, WikidError,
+	WriteResult,
 };
 
 use crate::config::Config;
@@ -71,6 +72,7 @@ pub fn app(state: AppState) -> Router {
 		.route("/v1/wikis/{wiki}/grep", get(grep))
 		.route("/v1/wikis/{wiki}/glob", get(glob))
 		.route("/v1/wikis/{wiki}/links", get(links))
+		.route("/v1/wikis/{wiki}/tags", get(tags))
 		.route("/v1/wikis/{wiki}/doctor", get(doctor))
 		.route("/v1/wikis/{wiki}/pages", put(write_page).delete(rm_page))
 		.route("/v1/wikis/{wiki}/edit", post(edit))
@@ -287,6 +289,10 @@ struct DoctorQuery {
 	profile: Option<DoctorProfile>,
 }
 
+async fn tags(State(state): State<Arc<AppState>>, Path(wiki): Path<String>) -> Result<Json<TagReport>, ApiError> {
+	Ok(Json(state.wiki(&wiki)?.tags()?))
+}
+
 async fn doctor(
 	State(state): State<Arc<AppState>>,
 	Path(wiki): Path<String>,
@@ -402,7 +408,10 @@ mod tests {
 			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 			std::fs::write(path, content).unwrap();
 		};
-		write("index.md", b"# Home\n\nSee [[alpha]].\n");
+		write(
+			"index.md",
+			b"---\ntags: [Home]\n---\n\n# Home\n\nSee [[alpha]]. #project\n",
+		);
 		write(
 			"projects/alpha.md",
 			b"# Alpha\n\nalpha status: green\nsecond alpha line\n",
@@ -591,7 +600,7 @@ mod tests {
 		let (status, body) = call(&app, get_req("/v1/wikis/main/cat?path=index.md&full=true")).await;
 		assert_eq!(status, StatusCode::OK);
 		let doc: Document = serde_json::from_value(body).unwrap();
-		assert_eq!(doc.total_lines, 3);
+		assert_eq!(doc.total_lines, 7);
 	}
 
 	#[tokio::test]
@@ -649,6 +658,19 @@ mod tests {
 		let (_, body) = call(&app, get_req("/v1/wikis/main/links?path=index.md")).await;
 		let report: LinkReport = serde_json::from_value(body).unwrap();
 		assert_eq!(report.outgoing[0].resolved.as_deref(), Some("projects/alpha.md"));
+	}
+
+	#[tokio::test]
+	async fn tags_lists_vault_tags() {
+		let dir = vault_dir();
+		let app = test_app(&dir);
+		let (status, body) = call(&app, get_req("/v1/wikis/main/tags")).await;
+		assert_eq!(status, StatusCode::OK);
+		let report: TagReport = serde_json::from_value(body).unwrap();
+		assert_eq!(report.tags.len(), 2);
+		assert_eq!(report.tags[0].tag, "Home");
+		assert_eq!(report.tags[0].pages, vec!["index.md"]);
+		assert_eq!(report.tags[1].tag, "project");
 	}
 
 	#[tokio::test]

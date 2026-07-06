@@ -242,6 +242,7 @@ fn remote_mode_matches_local_mode_end_to_end() {
 		&["grep", "zzz-not-there"], // zero matches: exit 1 in both modes
 		&["glob", "**/*.md"],
 		&["links", "index.md"],
+		&["tags"],
 		&["doctor"],
 		&["doctor", "--stale-days", "0", "--checks", "stale_pages,broken_links"],
 	];

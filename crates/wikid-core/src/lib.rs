@@ -12,6 +12,7 @@ pub mod links;
 pub mod ops;
 mod paths;
 pub mod status;
+pub mod tags;
 pub mod vault;
 
 #[cfg(test)]
@@ -26,4 +27,5 @@ pub use ops::{
 	LineEdit, Listing, MvResult, ReadLimit, ReadRange, RmResult, WriteResult, hash_line,
 };
 pub use status::{RecentPage, VaultStatus};
+pub use tags::{TagReport, TagSummary};
 pub use vault::Vault;

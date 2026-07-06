@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use wikid_core::{
 	Check, DoctorProfile, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult, HealthReport,
-	LineEdit, LinkReport, Listing, MvResult, ReadRange, RmResult, VaultStatus, WriteResult,
+	LineEdit, LinkReport, Listing, MvResult, ReadRange, RmResult, TagReport, VaultStatus, WriteResult,
 };
 
 use crate::error::CliError;
@@ -108,6 +108,10 @@ impl Remote {
 
 	pub fn links(&self, path: &str) -> Result<LinkReport, CliError> {
 		self.get("links", &[("path", path.to_owned())])
+	}
+
+	pub fn tags(&self) -> Result<TagReport, CliError> {
+		self.get("tags", &[])
 	}
 
 	pub fn doctor(

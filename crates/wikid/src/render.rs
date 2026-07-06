@@ -7,7 +7,7 @@
 
 use wikid_core::{
 	Document, EditResult, Entry, EntryKind, GlobResult, GrepResult, HashlinesResult, HealthReport, IssueCategory,
-	LinkReport, Listing, MvResult, RmResult, Severity, VaultStatus, WriteResult,
+	LinkReport, Listing, MvResult, RmResult, Severity, TagReport, VaultStatus, WriteResult,
 };
 
 /// Formats bytes as a compact human size (B / KiB / MiB).
@@ -255,6 +255,26 @@ pub fn links(report: &LinkReport) -> String {
 		lines.push(format!("  {path}"));
 	}
 	lines.push("hint: wikid cat <path> — follow a link".to_string());
+	lines.join("\n")
+}
+
+pub fn tags(report: &TagReport) -> String {
+	let mut lines = Vec::new();
+	if report.tags.is_empty() {
+		lines.push("no tags found".to_string());
+	} else {
+		for tag in &report.tags {
+			let page_word = if tag.count == 1 { "page" } else { "pages" };
+			let preview = tag.pages.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+			let suffix = if tag.pages.len() > 3 {
+				format!(", … {} more", tag.pages.len() - 3)
+			} else {
+				String::new()
+			};
+			lines.push(format!("#{}  {} {page_word}  {preview}{suffix}", tag.tag, tag.count));
+		}
+	}
+	lines.push("hint: wikid grep '#tag' — inspect a tag's source context".to_string());
 	lines.join("\n")
 }
 

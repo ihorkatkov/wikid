@@ -22,7 +22,11 @@ fn fixture_vault() -> TempDir {
 	fs::create_dir_all(root.join("notes")).unwrap();
 	fs::create_dir_all(root.join("assets")).unwrap();
 	fs::create_dir_all(root.join(".obsidian")).unwrap();
-	fs::write(root.join("index.md"), "# Home\n\nSee [[alpha]] and [[missing]].\n").unwrap();
+	fs::write(
+		root.join("index.md"),
+		"---\ntags: [Home]\n---\n\n# Home\n\nSee [[alpha]] and [[missing]]. #project\n",
+	)
+	.unwrap();
 	fs::write(
 		root.join("notes/alpha.md"),
 		"# Alpha\n\nThe needle is here.\nAnother needle line.\n",
@@ -224,6 +228,7 @@ fn axi_7_human_output_ends_with_hints_json_has_none() {
 		&["grep", "needle"],
 		&["glob", "**/*.md"],
 		&["links", "index.md"],
+		&["tags"],
 		&["doctor"],
 	];
 	for args in commands {
@@ -304,6 +309,9 @@ fn json_output_parses_for_every_command() {
 	let links = json_of(wikid(vault.path()).args(["links", "index.md", "--json"]));
 	assert!(links["outgoing"].is_array());
 	assert!(links["backlinks"].is_array());
+	let tags = json_of(wikid(vault.path()).args(["tags", "--json"]));
+	assert_eq!(tags["tags"][0]["tag"], "Home");
+	assert_eq!(tags["tags"][1]["tag"], "project");
 	let doctor = json_of(wikid(vault.path()).args(["doctor", "--json"]));
 	assert!(doctor["issues"].is_array());
 	assert!(doctor["summary"].is_string());
