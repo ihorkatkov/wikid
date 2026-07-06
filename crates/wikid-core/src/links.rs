@@ -9,10 +9,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WikidError;
 use crate::frontmatter;
+use crate::markdown::FenceTracker;
 use crate::obsidian_config::ObsidianConfig;
 use crate::ops::{is_page, read_text};
 use crate::paths;
-use crate::tags::{fence_marker, inline_code_spans};
+use crate::tags::inline_code_spans;
 use crate::vault::Vault;
 
 /// How a link was written in the source page.
@@ -98,20 +99,10 @@ fn markdown_re() -> &'static regex::Regex {
 /// anchors (`#heading`, `[[#heading]]`) are skipped.
 pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 	let mut found: Vec<(usize, ExtractedLink)> = Vec::new();
-	let mut in_fence: Option<&str> = None;
+	let mut fences = FenceTracker::new();
 	let mut offset = 0;
 	for line in content.split_inclusive('\n') {
-		let trimmed = line.trim_start();
-		if let Some(fence) = fence_marker(trimmed) {
-			if in_fence == Some(fence) {
-				in_fence = None;
-			} else if in_fence.is_none() {
-				in_fence = Some(fence);
-			}
-			offset += line.len();
-			continue;
-		}
-		if in_fence.is_some() {
+		if fences.observe(line) || fences.in_fence() {
 			offset += line.len();
 			continue;
 		}
@@ -272,14 +263,9 @@ fn hex_val(byte: u8) -> Option<u8> {
 /// whitespace. Anchors inside fenced code blocks are ignored.
 pub(crate) fn block_anchors(content: &str) -> Vec<String> {
 	let mut anchors = Vec::new();
-	let mut in_code_fence = false;
+	let mut fences = FenceTracker::new();
 	for line in content.lines() {
-		let trimmed_start = line.trim_start();
-		if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
-			in_code_fence = !in_code_fence;
-			continue;
-		}
-		if in_code_fence {
+		if fences.observe(line) || fences.in_fence() {
 			continue;
 		}
 		let trimmed_end = line.trim_end();
@@ -623,6 +609,12 @@ mod tests {
 			"Some text ^abc123\nnot an ^anchor in middle of line\n- bullet ^with-dash\n```\ncode ^ignored\n```\n~~~\nmore ^ignored\n~~~\n",
 		);
 		assert_eq!(anchors, vec!["abc123", "with-dash"]);
+	}
+
+	#[test]
+	fn mixed_fence_delimiters_do_not_flip_block_anchor_scanning() {
+		let anchors = block_anchors("```\n~~~\nignored ^no\n```\nanchored line ^blk1\n");
+		assert_eq!(anchors, vec!["blk1"]);
 	}
 
 	#[test]

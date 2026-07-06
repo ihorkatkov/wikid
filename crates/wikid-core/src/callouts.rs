@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::markdown::FenceTracker;
+
 /// One Obsidian callout block header found in a Markdown page.
 ///
 /// This is a wire-visible core type when surfaced by CLI/HTTP/MCP adapters.
@@ -32,17 +34,13 @@ pub struct Callout {
 /// result.
 pub fn extract_callouts(content: &str) -> Vec<Callout> {
 	let mut callouts = Vec::new();
-	let mut in_code_fence = false;
+	let mut fences = FenceTracker::new();
 
 	for line in content.lines() {
+		if fences.observe(line) || fences.in_fence() {
+			continue;
+		}
 		let trimmed_start = line.trim_start();
-		if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
-			in_code_fence = !in_code_fence;
-			continue;
-		}
-		if in_code_fence {
-			continue;
-		}
 
 		let Some(after_quote) = trimmed_start.strip_prefix('>') else {
 			continue;
@@ -113,6 +111,13 @@ mod tests {
 	#[test]
 	fn callouts_inside_fenced_code_blocks_are_ignored() {
 		let callouts = extract_callouts("```\n> [!note] ignored\n```\n> [!note] kept\n~~~\n> [!tip] ignored\n~~~\n");
+		assert_eq!(callouts.len(), 1);
+		assert_eq!(callouts[0].title.as_deref(), Some("kept"));
+	}
+
+	#[test]
+	fn mixed_fence_delimiters_do_not_flip_callout_scanning() {
+		let callouts = extract_callouts("```\n~~~\n> [!note] ignored\n```\n> [!note] kept\n");
 		assert_eq!(callouts.len(), 1);
 		assert_eq!(callouts[0].title.as_deref(), Some("kept"));
 	}

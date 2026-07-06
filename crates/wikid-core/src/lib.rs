@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod error;
 pub mod frontmatter;
 pub mod links;
+mod markdown;
 mod obsidian_config;
 pub mod ops;
 mod paths;

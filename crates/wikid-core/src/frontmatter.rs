@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::markdown::FenceTracker;
+
 /// Outcome of scanning a page for a leading frontmatter block.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Frontmatter {
@@ -72,7 +74,9 @@ pub fn page_title(content: &str, stem: &str) -> String {
 	{
 		return title.trim().to_string();
 	}
+	let mut fences = FenceTracker::new();
 	body.lines()
+		.filter(|line| !(fences.observe(line) || fences.in_fence()))
 		.find_map(|line| line.strip_prefix("# "))
 		.map(|heading| heading.trim().to_string())
 		.filter(|heading| !heading.is_empty())
@@ -221,6 +225,11 @@ mod tests {
 		assert_eq!(page_title("---\ntitle: 42\n---\n\n# Heading\n", "s"), "Heading");
 		// Deeper headings do not count.
 		assert_eq!(page_title("## Sub\n\n# Real\n", "s"), "Real");
+	}
+
+	#[test]
+	fn title_ignores_h1_inside_mixed_fenced_code_block() {
+		assert_eq!(page_title("```\n~~~\n# Ignored\n```\n# Real\n", "stem"), "Real");
 	}
 
 	#[test]

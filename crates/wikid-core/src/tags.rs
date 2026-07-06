@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WikidError;
 use crate::frontmatter::Frontmatter;
+use crate::markdown::FenceTracker;
 use crate::ops::{is_page, read_text};
 use crate::vault::Vault;
 
@@ -57,20 +58,10 @@ pub fn extract_tags(content: &str) -> Vec<String> {
 		.map(|m| (body_offset + m.start(), body_offset + m.end()))
 		.collect();
 	let mut tags = Vec::new();
-	let mut in_fence: Option<&str> = None;
+	let mut fences = FenceTracker::new();
 	let mut offset = body_offset;
 	for line in body.split_inclusive('\n') {
-		let trimmed = line.trim_start();
-		if let Some(fence) = fence_marker(trimmed) {
-			if in_fence == Some(fence) {
-				in_fence = None;
-			} else if in_fence.is_none() {
-				in_fence = Some(fence);
-			}
-			offset += line.len();
-			continue;
-		}
-		if in_fence.is_some() {
+		if fences.observe(line) || fences.in_fence() {
 			offset += line.len();
 			continue;
 		}
@@ -181,16 +172,6 @@ fn body_start(content: &str) -> usize {
 	0
 }
 
-pub(crate) fn fence_marker(trimmed_line: &str) -> Option<&'static str> {
-	if trimmed_line.starts_with("```") {
-		Some("```")
-	} else if trimmed_line.starts_with("~~~") {
-		Some("~~~")
-	} else {
-		None
-	}
-}
-
 pub(crate) fn inline_code_spans(line: &str) -> Vec<(usize, usize)> {
 	let bytes = line.as_bytes();
 	let mut ranges = Vec::new();
@@ -262,6 +243,12 @@ mod tests {
 	fn excludes_headings_code_and_numeric_only_tags() {
 		let content = "# Heading\n## Sub\ntext #ok and #123\n```\n#notatag\n```\n`#inline` #real\n";
 		assert_eq!(extract_tags(content), vec!["ok", "real"]);
+	}
+
+	#[test]
+	fn mixed_fence_delimiters_do_not_flip_tag_scanning() {
+		let content = "```\n~~~\n#ignored\n```\n#real\n";
+		assert_eq!(extract_tags(content), vec!["real"]);
 	}
 
 	#[test]

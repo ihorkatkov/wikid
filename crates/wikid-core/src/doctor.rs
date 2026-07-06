@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::WikidError;
 use crate::frontmatter::{self, Frontmatter};
 use crate::links::{ExtractedLink, LinkIndex, Resolution, block_anchors, extract_links};
+use crate::markdown::FenceTracker;
 use crate::obsidian_config::ObsidianConfig;
 use crate::ops::{is_page, read_text};
 use crate::vault::Vault;
@@ -475,16 +476,12 @@ fn summarize(issues: &[Issue], total_pages: usize) -> String {
 
 fn extract_atx_headings(content: &str) -> Vec<String> {
 	let mut headings = Vec::new();
-	let mut in_code_fence = false;
+	let mut fences = FenceTracker::new();
 	for line in content.lines() {
+		if fences.observe(line) || fences.in_fence() {
+			continue;
+		}
 		let trimmed_start = line.trim_start();
-		if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
-			in_code_fence = !in_code_fence;
-			continue;
-		}
-		if in_code_fence {
-			continue;
-		}
 		let Some(rest) = trimmed_start.strip_prefix('#') else {
 			continue;
 		};
@@ -547,7 +544,7 @@ fn fragment_issues(source_pages: &[PageScan], targets: &BTreeMap<&str, &PageScan
 						if fragment.starts_with('^') {
 							return None;
 						}
-						let wanted = fragment.trim();
+						let wanted = fragment.rsplit('#').next().unwrap_or(fragment).trim();
 						if wanted.is_empty()
 							|| target_page
 								.headings
@@ -1303,6 +1300,39 @@ mod tests {
 	}
 
 	#[test]
+	fn doctor_accepts_heading_and_block_after_mismatched_fence_inside_code_block() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(
+			dir.path().join("source.md"),
+			"[[target#Real Heading]] [[target#^blk1]]\n",
+		)
+		.unwrap();
+		std::fs::write(
+			dir.path().join("target.md"),
+			"```\n~~~\nstill code ^ignored\n```\n## Real Heading\nanchored line ^blk1\n",
+		)
+		.unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenHeadingReference, Check::BrokenBlockReference]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(
+			report.counts["broken_heading_reference"], 0,
+			"issues: {:?}",
+			report.issues
+		);
+		assert_eq!(
+			report.counts["broken_block_reference"], 0,
+			"issues: {:?}",
+			report.issues
+		);
+	}
+
+	#[test]
 	fn doctor_reports_missing_heading_references_case_insensitively() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::write(dir.path().join("source.md"), "[[note#setup]] [[note#Missing|Alias]]\n").unwrap();
@@ -1319,6 +1349,27 @@ mod tests {
 		let issue = report.issues.first().unwrap();
 		assert_eq!(issue.severity, Severity::Medium);
 		assert!(issue.detail.contains("Missing"));
+	}
+
+	#[test]
+	fn doctor_validates_nested_heading_fragments_by_final_segment() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("source.md"), "[[t#Top#Sub]] [[t#Top#Missing]]\n").unwrap();
+		std::fs::write(dir.path().join("t.md"), "# Top\n\n## Sub\n").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenHeadingReference]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(
+			report.counts["broken_heading_reference"], 1,
+			"issues: {:?}",
+			report.issues
+		);
+		assert!(report.issues[0].detail.contains("Missing"));
 	}
 
 	#[test]
