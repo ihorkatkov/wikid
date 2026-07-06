@@ -92,6 +92,21 @@ fn json_of(cmd: &mut Command) -> serde_json::Value {
 	serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("stdout is not valid JSON ({e}): {stdout}"))
 }
 
+fn assert_doc_hash_line(line: &str, expected_line: &str, expected_text: &str, section: &str) -> String {
+	let mut parts = line.splitn(3, ':');
+	let number = parts.next().unwrap_or_default();
+	let hash = parts.next().unwrap_or_default();
+	let text = parts.next().unwrap_or_default();
+	assert_eq!(number, expected_line, "{section}: line number changed: {line}");
+	assert_eq!(hash.len(), 12, "{section}: hash is not 12 hex chars: {line}");
+	assert!(
+		hash.chars().all(|c| c.is_ascii_hexdigit()),
+		"{section}: hash is not hex: {line}"
+	);
+	assert_eq!(text, format!(" {expected_text}"), "{section}: text changed: {line}");
+	hash.to_owned()
+}
+
 // --- AXI conformance checklist (DESIGN §6), one test per item ---
 
 #[test]
@@ -159,6 +174,146 @@ fn cat_lines_reads_windows_and_hashes_use_absolute_line_numbers() {
 		.args(["cat", "big.md", "--full", "--lines", "1-2"])
 		.assert()
 		.failure();
+}
+
+#[test]
+fn core_skill_documented_workflow_matches_real_cli_output() {
+	let section = "skills/core/SKILL.md";
+	let vault = TempDir::new().unwrap();
+	let root = vault.path();
+	fs::create_dir_all(root.join("concepts")).unwrap();
+	fs::create_dir_all(root.join("entities")).unwrap();
+	fs::write(root.join("index.md"), "# Index\n\nSee [[concepts/billing.md]].\n").unwrap();
+	fs::write(root.join("entities/Stripe.md"), "# Stripe\n").unwrap();
+
+	let mut lines = vec![
+		"# Billing".to_string(),
+		"".to_string(),
+		"Stripe is the primary payment provider. #project/billing".to_string(),
+		"See [[entities/Stripe.md]] and [[Missing]].".to_string(),
+	];
+	for i in 5..=9 {
+		lines.push(format!("context line {i}"));
+	}
+	lines.push("## Refunds".to_string());
+	lines.push("Refunds are approved by support.".to_string());
+	lines.push("Escalate unusual refunds to finance.".to_string());
+	for i in 13..=500 {
+		lines.push(format!("filler line {i}"));
+	}
+	fs::write(root.join("concepts/billing.md"), format!("{}\n", lines.join("\n"))).unwrap();
+
+	let hashes = stdout_of(wikid(root).args(["cat", "concepts/billing.md", "--hashes", "--lines", "10-12"]));
+	let hash_lines = hashes.lines().collect::<Vec<_>>();
+	assert!(
+		hash_lines.len() >= 4,
+		"{section} §3 cat --hashes output too short: {hashes}"
+	);
+	assert_doc_hash_line(
+		hash_lines[0],
+		"10",
+		"## Refunds",
+		"cat --hashes output no longer matches skills/core/SKILL.md §3",
+	);
+	let stale_hash = assert_doc_hash_line(
+		hash_lines[1],
+		"11",
+		"Refunds are approved by support.",
+		"cat --hashes output no longer matches skills/core/SKILL.md §3",
+	);
+	assert_doc_hash_line(
+		hash_lines[2],
+		"12",
+		"Escalate unusual refunds to finance.",
+		"cat --hashes output no longer matches skills/core/SKILL.md §3",
+	);
+	assert!(
+		hash_lines
+			.contains(&"hint: wikid edit concepts/billing.md --line <n> --hash <hash> --new=<text> — replace a line"),
+		"cat --hashes hint no longer matches skills/core/SKILL.md §3: {hashes}"
+	);
+
+	wikid(root)
+		.args([
+			"edit",
+			"concepts/billing.md",
+			"--line",
+			"11",
+			"--hash",
+			&stale_hash,
+			"--new=THREE",
+		])
+		.assert()
+		.success();
+	let stale = wikid(root)
+		.args([
+			"edit",
+			"concepts/billing.md",
+			"--line",
+			"11",
+			"--hash",
+			&stale_hash,
+			"--new=Refunds are approved by support using the refund checklist.",
+		])
+		.output()
+		.expect("run stale edit");
+	assert!(!stale.status.success(), "stale edit unexpectedly succeeded");
+	let stale_out = String::from_utf8(stale.stdout).unwrap();
+	assert!(
+		stale_out.starts_with("error[stale_edit]: stale edit in concepts/billing.md: line 11 is now "),
+		"stale_edit error no longer matches skills/core/SKILL.md §3: {stale_out}"
+	);
+	assert!(
+		stale_out.contains(&format!(" (\"THREE\"), not {stale_hash}\n")),
+		"stale_edit hash/text fields no longer match skills/core/SKILL.md §3: {stale_out}"
+	);
+	assert!(
+		stale_out.contains(
+			"hint: the page changed since it was read — run cat concepts/billing.md with hashes and retry with fresh line hashes"
+		),
+		"stale_edit hint no longer matches skills/core/SKILL.md §3: {stale_out}"
+	);
+
+	let truncated = stdout_of(wikid(root).args(["cat", "concepts/billing.md"]));
+	assert!(
+		truncated.contains("… truncated (500 lines / ")
+			&& truncated.contains(" bytes total) — use --full or --lines <START-END>"),
+		"truncation hint shape no longer matches skills/core/SKILL.md §2: {truncated}"
+	);
+	assert!(
+		truncated.contains("hint: wikid cat concepts/billing.md --lines 1-120 — read a window"),
+		"truncation next-step hint no longer matches skills/core/SKILL.md §2: {truncated}"
+	);
+
+	let tags = stdout_of(wikid(root).arg("tags"));
+	assert!(
+		tags.lines()
+			.any(|line| line.starts_with("#project/billing  1 occurrence  concepts/billing.md")),
+		"tags output no longer matches skills/core/SKILL.md §5: {tags}"
+	);
+	assert!(
+		tags.lines()
+			.any(|line| line.starts_with("#project (implied)  1 occurrence  concepts/billing.md")),
+		"implied tags output no longer matches skills/core/SKILL.md §5: {tags}"
+	);
+
+	let links = stdout_of(wikid(root).args(["links", "concepts/billing.md"]));
+	assert!(
+		links.contains("outgoing: 2"),
+		"links outgoing count no longer matches skills/core/SKILL.md §4: {links}"
+	);
+	assert!(
+		links.contains("  [[entities/Stripe.md]] → entities/Stripe.md"),
+		"links resolved line no longer matches skills/core/SKILL.md §4: {links}"
+	);
+	assert!(
+		links.contains("  [[Missing]] → (unresolved)"),
+		"links unresolved line no longer matches skills/core/SKILL.md §4: {links}"
+	);
+	assert!(
+		links.contains("backlinks: 1\n  index.md"),
+		"backlinks output no longer matches skills/core/SKILL.md §4: {links}"
+	);
 }
 
 #[test]
@@ -1345,12 +1500,25 @@ fn skills_path_materializes_versioned_tree_and_current_symlink() {
 		.arg("core");
 	let path = stdout_of(&mut cmd).trim().to_owned();
 	let skill_dir = PathBuf::from(&path);
+	assert!(path.contains("/wikid/skills/current/core"));
 	assert!(skill_dir.join("SKILL.md").is_file());
 	assert!(skill_dir.join("references/json-shapes.md").is_file());
-	let version_dir = skill_dir.parent().unwrap();
+	let current_dir = skill_dir.parent().unwrap();
+	let base_dir = current_dir.parent().unwrap();
+	let version_dir = base_dir.join(env!("CARGO_PKG_VERSION"));
 	assert!(version_dir.join("llm-wiki/SKILL.md").is_file());
 	assert!(version_dir.join(".complete").is_file());
-	assert!(version_dir.parent().unwrap().join("current").exists());
+	assert!(base_dir.join("current").exists());
+	let json = json_of(
+		wikid_untargeted()
+			.env("XDG_DATA_HOME", data.path())
+			.arg("skills")
+			.arg("path")
+			.arg("core")
+			.arg("--json"),
+	);
+	assert_eq!(json["path"], path);
+	assert_eq!(json["versioned_path"], version_dir.join("core").display().to_string());
 
 	let path_again = stdout_of(
 		wikid_untargeted()
@@ -1360,6 +1528,17 @@ fn skills_path_materializes_versioned_tree_and_current_symlink() {
 			.arg("core"),
 	);
 	assert_eq!(path_again.trim(), path);
+
+	let status = json_of(
+		wikid_untargeted()
+			.env("XDG_DATA_HOME", data.path())
+			.arg("skills")
+			.arg("status")
+			.arg("--json"),
+	);
+	assert_eq!(status["embedded"]["guides"], 2);
+	assert_eq!(status["materialized"]["version_present"], true);
+	assert_eq!(status["materialized"]["stale_versions"], 0);
 }
 
 #[test]

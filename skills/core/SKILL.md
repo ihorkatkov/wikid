@@ -251,7 +251,7 @@ Run the full reference when exact JSON fields, doctor checks, or link-resolution
 wikid skills get core --full
 ```
 
-If this skill was materialized with `wikid skills path`, reference files also exist under `references/`. Otherwise, `wikid skills get core --full` appends them after this body.
+If this skill was materialized with `wikid skills path`, reference files also exist under `references/`; use `wikid skills status` to inspect the local cache and Claude skill symlink wiring. Otherwise, `wikid skills get core --full` appends them after this body.
 
 Reference files:
 

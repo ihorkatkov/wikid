@@ -58,13 +58,31 @@ Fields:
 `wikid skills path --json`:
 
 ```json
-{"path":"/home/me/.local/share/wikid/skills/<crate-version>","version":"<crate-version>"}
+{"path":"/home/me/.local/share/wikid/skills/current","version":"<crate-version>","versioned_path":"/home/me/.local/share/wikid/skills/<crate-version>"}
 ```
 
 Fields:
 
-- `path`: materialized version directory, or the named skill directory when a name was passed.
+- `path`: materialized `current` directory, or the named skill directory under `current` when a name was passed.
 - `version`: wikid crate version.
+- `versioned_path`: concrete materialized version directory, or the named skill directory under that version when a name was passed.
+
+`wikid skills status --json`:
+
+```json
+{"embedded":{"version":"<crate-version>","guides":2},"materialized":{"path":"/home/me/.local/share/wikid/skills","current":"/home/me/.local/share/wikid/skills/<crate-version>","version_present":true,"stale_versions":0},"wiring":[{"link":"/home/me/.claude/skills/wikid-core","target":"/home/me/.local/share/wikid/skills/current/core","state":"ok"}]}
+```
+
+Fields:
+
+- `embedded.version`: wikid crate version compiled into the binary.
+- `embedded.guides`: number of embedded guide directories.
+- `materialized.path`: skills cache root.
+- `materialized.current`: `current` symlink target, or null when missing.
+- `materialized.version_present`: whether the current binary's version dir exists and has `.complete`.
+- `materialized.stale_versions`: old completed version dirs left in the cache.
+- `wiring`: Claude skill symlinks that point into the wikid skills cache.
+- `wiring[].state`: `ok` when routed through `current`, `pinned` when linked to a concrete version, `broken` when the symlink target is missing.
 
 ## status
 

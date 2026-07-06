@@ -63,6 +63,43 @@ pub struct SkillGetResult {
 pub struct SkillPathResult {
 	pub path: String,
 	pub version: String,
+	pub versioned_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkillStatusResult {
+	pub embedded: EmbeddedStatus,
+	pub materialized: MaterializedStatus,
+	pub wiring: Vec<WiringStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EmbeddedStatus {
+	pub version: String,
+	pub guides: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MaterializedStatus {
+	pub path: String,
+	pub current: Option<String>,
+	pub version_present: bool,
+	pub stale_versions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WiringStatus {
+	pub link: String,
+	pub target: String,
+	pub state: WiringState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WiringState {
+	Ok,
+	Pinned,
+	Broken,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -115,13 +152,19 @@ pub fn materialize(name: Option<&str>) -> Result<SkillPathResult, CliError> {
 		fs::rename(&tmp, &version_dir).map_err(io_error)?;
 	}
 	update_current_symlink(&base, &version_dir)?;
+	let current_dir = base.join("current");
 	let path = match name {
+		Some(name) => current_dir.join(name),
+		None => current_dir,
+	};
+	let versioned_path = match name {
 		Some(name) => version_dir.join(name),
 		None => version_dir,
 	};
 	Ok(SkillPathResult {
 		path: path.display().to_string(),
 		version: version.to_owned(),
+		versioned_path: versioned_path.display().to_string(),
 	})
 }
 
@@ -131,8 +174,14 @@ pub fn render_list(result: &SkillListResult) -> String {
 
 fn render_list_at_width(result: &SkillListResult, width: usize) -> String {
 	let mut lines = Vec::new();
+	let name_width = result
+		.skills
+		.iter()
+		.map(|skill| skill.name.chars().count())
+		.max()
+		.unwrap_or(0);
 	for skill in &result.skills {
-		let prefix = format!("{} — ", skill.name);
+		let prefix = format!("{:<name_width$} — ", skill.name);
 		lines.extend(wrap_with_prefix(&prefix, &skill.description, width));
 	}
 	let guide_word = if result.skills.len() == 1 { "guide" } else { "guides" };
@@ -159,6 +208,161 @@ fn catalog_width() -> usize {
 	} else {
 		72
 	}
+}
+
+pub fn status() -> Result<SkillStatusResult, CliError> {
+	let version = env!("CARGO_PKG_VERSION").to_owned();
+	let base = skills_data_dir()?;
+	let version_dir = base.join(&version);
+	let current = current_target(&base)?;
+	let version_present = version_dir.join(".complete").is_file();
+	let stale_versions = stale_version_count(&base, &version)?;
+	Ok(SkillStatusResult {
+		embedded: EmbeddedStatus {
+			version,
+			guides: SKILLS.len(),
+		},
+		materialized: MaterializedStatus {
+			path: base.display().to_string(),
+			current: current.map(|path| path.display().to_string()),
+			version_present,
+			stale_versions,
+		},
+		wiring: scan_claude_wiring(&base)?,
+	})
+}
+
+pub fn render_status(result: &SkillStatusResult) -> String {
+	let mut lines = Vec::new();
+	lines.push(format!(
+		"embedded: version {}  guides {}",
+		result.embedded.version, result.embedded.guides
+	));
+	lines.push(format!("materialized: {}", result.materialized.path));
+	lines.push(format!(
+		"  version_present: {}",
+		if result.materialized.version_present {
+			"yes"
+		} else {
+			"no"
+		}
+	));
+	lines.push(format!(
+		"  current: {}",
+		result.materialized.current.as_deref().unwrap_or("(missing)")
+	));
+	lines.push(format!("  stale_versions: {}", result.materialized.stale_versions));
+	lines.push("wiring:".to_owned());
+	if result.wiring.is_empty() {
+		lines.push("  none".to_owned());
+		lines.push("hint: ln -s \"$(wikid skills path core)\" ~/.claude/skills/wikid-core".to_owned());
+	} else {
+		for wire in &result.wiring {
+			lines.push(format!("  {} -> {}  {}", wire.link, wire.target, wire.state.as_str()));
+		}
+		if result.wiring.iter().any(|wire| wire.state == WiringState::Pinned) {
+			lines.push("hint: relink pinned skills with `wikid skills path <name>` so updates self-heal".to_owned());
+		}
+	}
+	if !result.materialized.version_present {
+		lines.push("hint: wikid skills path — materialize the current version".to_owned());
+	}
+	lines.join("\n")
+}
+
+impl WiringState {
+	fn as_str(&self) -> &'static str {
+		match self {
+			WiringState::Ok => "ok",
+			WiringState::Pinned => "pinned",
+			WiringState::Broken => "broken",
+		}
+	}
+}
+
+fn current_target(base: &Path) -> Result<Option<PathBuf>, CliError> {
+	let current = base.join("current");
+	match fs::read_link(&current) {
+		Ok(target) => Ok(Some(target)),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+		Err(err) => Err(io_error(err)),
+	}
+}
+
+fn stale_version_count(base: &Path, version: &str) -> Result<usize, CliError> {
+	let Ok(entries) = fs::read_dir(base) else {
+		return Ok(0);
+	};
+	let mut count = 0;
+	for entry in entries {
+		let entry = entry.map_err(io_error)?;
+		let file_name = entry.file_name();
+		let name = file_name.to_string_lossy();
+		if name == version || name == "current" || name.starts_with('.') {
+			continue;
+		}
+		if entry.file_type().map_err(io_error)?.is_dir() && entry.path().join(".complete").is_file() {
+			count += 1;
+		}
+	}
+	Ok(count)
+}
+
+fn scan_claude_wiring(base: &Path) -> Result<Vec<WiringStatus>, CliError> {
+	let Some(home) = env_nonempty("HOME") else {
+		return Ok(Vec::new());
+	};
+	let skills_dir = PathBuf::from(home).join(".claude").join("skills");
+	let Ok(entries) = fs::read_dir(&skills_dir) else {
+		return Ok(Vec::new());
+	};
+	let base_canon = canonicalize_lossy(base);
+	let current_path = base.join("current");
+	let mut wiring = Vec::new();
+	for entry in entries {
+		let entry = entry.map_err(io_error)?;
+		let link_path = entry.path();
+		let meta = fs::symlink_metadata(&link_path).map_err(io_error)?;
+		if !meta.file_type().is_symlink() {
+			continue;
+		}
+		let raw_target = fs::read_link(&link_path).map_err(io_error)?;
+		let abs_target = if raw_target.is_absolute() {
+			raw_target.clone()
+		} else {
+			skills_dir.join(&raw_target)
+		};
+		let target_text = raw_target.display().to_string();
+		let resolved = fs::canonicalize(&abs_target);
+		let state = match resolved {
+			Ok(resolved) => {
+				if !canonicalize_lossy(&resolved).starts_with(&base_canon) {
+					continue;
+				}
+				if path_routes_through_current(&abs_target, &current_path) {
+					WiringState::Ok
+				} else {
+					WiringState::Pinned
+				}
+			}
+			Err(_) => WiringState::Broken,
+		};
+		wiring.push(WiringStatus {
+			link: link_path.display().to_string(),
+			target: target_text,
+			state,
+		});
+	}
+	wiring.sort_by(|a, b| a.link.cmp(&b.link));
+	Ok(wiring)
+}
+
+fn canonicalize_lossy(path: &Path) -> PathBuf {
+	fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn path_routes_through_current(target: &Path, current: &Path) -> bool {
+	target == current || target.starts_with(current)
 }
 
 fn write_all(root: &Path) -> Result<(), CliError> {
@@ -315,7 +519,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 fn wrap_with_prefix(prefix: &str, text: &str, width: usize) -> Vec<String> {
-	let indent = " ".repeat(prefix.len());
+	let indent = " ".repeat(prefix.chars().count());
 	let mut lines = Vec::new();
 	let mut line = prefix.to_owned();
 	for word in text.split_whitespace() {
@@ -324,7 +528,7 @@ fn wrap_with_prefix(prefix: &str, text: &str, width: usize) -> Vec<String> {
 		} else {
 			" "
 		};
-		if line.len() + sep.len() + word.len() > width && line != prefix {
+		if line.chars().count() + sep.chars().count() + word.chars().count() > width && line != prefix {
 			lines.push(line);
 			line = format!("{indent}{word}");
 		} else {
@@ -359,20 +563,28 @@ mod tests {
 	}
 
 	#[test]
-	fn wrap_with_prefix_respects_width_and_hanging_indent() {
-		let text = "one two three four five six seven";
+	fn rendered_catalog_uses_a_fixed_description_column() {
+		let result = SkillListResult {
+			skills: vec![
+				SkillSummary {
+					name: "core".to_owned(),
+					description: "one two three four five six".to_owned(),
+				},
+				SkillSummary {
+					name: "llm-wiki".to_owned(),
+					description: "alpha beta gamma delta".to_owned(),
+				},
+			],
+		};
+		let rendered = render_list_at_width(&result, 28);
 		assert_eq!(
-			wrap_with_prefix("core — ", text, 20),
+			rendered.lines().take(4).collect::<Vec<_>>(),
 			vec![
-				"core — one two",
-				"         three four",
-				"         five six",
-				"         seven"
+				"core     — one two three",
+				"           four five six",
+				"llm-wiki — alpha beta gamma",
+				"           delta",
 			]
-		);
-		assert_eq!(
-			wrap_with_prefix("core — ", text, 40),
-			vec!["core — one two three four five six", "         seven"]
 		);
 	}
 

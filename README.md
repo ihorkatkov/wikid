@@ -175,7 +175,10 @@ To expose the embedded guide as a Claude Code skill, materialize it and symlink 
 
 ```sh
 ln -s "$(wikid skills path core)" ~/.claude/skills/wikid-core
+wikid skills status
 ```
+
+Wiring is version-independent: `wikid skills path` prints a path routed through `current`, so updating wikid refreshes the guides behind the same symlink.
 
 `examples/llm-wiki/` is a small public-safe demo vault showing the full pattern — raw-source intake, compiled concept pages, an index, a log, and clean wikilinks:
 

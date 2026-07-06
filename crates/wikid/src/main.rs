@@ -214,6 +214,8 @@ enum SkillsCommand {
 	},
 	/// Materialize embedded usage guides and print their path
 	Path { name: Option<String> },
+	/// Report embedded guides, materialized cache, and Claude skill wiring
+	Status,
 }
 
 #[derive(Subcommand)]
@@ -418,6 +420,10 @@ fn run_skills(command: Option<SkillsCommand>, json: bool) -> Result<Outcome, Cli
 		SkillsCommand::Path { name } => {
 			let result = skills::materialize(name.as_deref())?;
 			Ok(Outcome::ok(emit(json, &result, || result.path.clone())))
+		}
+		SkillsCommand::Status => {
+			let result = skills::status()?;
+			Ok(Outcome::ok(emit(json, &result, || skills::render_status(&result))))
 		}
 	}
 }
