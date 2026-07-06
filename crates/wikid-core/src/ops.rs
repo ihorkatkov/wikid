@@ -960,6 +960,34 @@ mod tests {
 	}
 
 	#[test]
+	fn obsidian_config_does_not_expose_hidden_obsidian_files_to_walks() {
+		let (dir, vault) = fixture();
+		std::fs::write(
+			dir.path().join(".obsidian/app.json"),
+			r#"{"attachmentFolderPath":"attachments","sentinel":"hidden needle"}"#,
+		)
+		.unwrap();
+
+		let listing = vault.ls(None, 10).unwrap();
+		assert!(paths(&listing.entries).iter().all(|path| !path.contains(".obsidian")));
+
+		// `tree` is the CLI's rendered view over the same recursive listing.
+		let tree_listing = vault.ls(None, usize::MAX).unwrap();
+		assert!(
+			paths(&tree_listing.entries)
+				.iter()
+				.all(|path| !path.contains(".obsidian"))
+		);
+
+		let grep = vault.grep("hidden needle", &GrepOptions::default()).unwrap();
+		assert_eq!(grep.total_matches, 0);
+		assert!(grep.matches.is_empty());
+
+		let walked: Vec<String> = vault.visible_files().unwrap().into_iter().map(|(rel, _)| rel).collect();
+		assert!(walked.iter().all(|path| !path.contains(".obsidian")), "{walked:?}");
+	}
+
+	#[test]
 	fn ls_gitignored_dirs_are_invisible_even_without_git() {
 		let (_dir, vault) = fixture();
 		let listing = vault.ls(None, 3).unwrap();

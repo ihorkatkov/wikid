@@ -42,8 +42,9 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 ## 4. Core: link model (Obsidian-compatible)
 
 - Extract `[[Target]]`, `[[Target|alias]]`, `[[Target#Heading]]`, `[[Target#^block-id]]`, embeds (`![[Target]]`, `![alt](relative/path)`), and markdown links `[text](relative/path.md)` (skip `http(s)://`, `mailto:`, anchors). Fragments are retained on links but ignored for target resolution.
-- Resolution, in order: (1) exact relative path from root (with/without `.md`); (2) unique file-stem match anywhere in the vault (case-insensitive); (3) unique path-suffix match (`folder/Note`); (4) unique frontmatter alias match from `aliases` (string or list, case-insensitive). Real file/path/stem matches win before aliases. Multiple candidates at a stage → unresolved + flagged `ambiguous` (doctor reports it). No match → broken link.
+- Resolution, in order: (1) exact relative path from root (with/without `.md`); (2) if `.obsidian/app.json` has `attachmentFolderPath`, an exact file under that configured folder for the target; (3) unique file-stem match anywhere in the vault (case-insensitive); (4) unique path-suffix match (`folder/Note`); (5) unique frontmatter alias match from `aliases` (string or list, case-insensitive). Real root path matches win first; configured attachment-folder matches can disambiguate duplicate attachment filenames; file/path/stem matches win before aliases. Multiple candidates at a stage → unresolved + flagged `ambiguous` (doctor reports it). No match → broken link.
 - Frontmatter: leading `---\n…\n---` block parsed with `serde_yaml` into a string-keyed map. Absence is normal. Malformed YAML → treated as no frontmatter; doctor flags it and includes the `serde_yaml` parser/type error string in the issue detail.
+- Obsidian config: only `.obsidian/app.json`'s `attachmentFolderPath` is honored, via a targeted read of that known file. Missing `.obsidian/`, missing app.json, malformed JSON, or invalid paths degrade to no config; `.obsidian/` remains hidden from normal ls/tree/grep/page walks.
 - Page title: frontmatter `title` → first `# heading` → file stem.
 
 ## 5. Core: doctor checks

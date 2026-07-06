@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::WikidError;
 use crate::frontmatter::{self, Frontmatter};
 use crate::links::{ExtractedLink, LinkIndex, Resolution, block_anchors, extract_links};
+use crate::obsidian_config::ObsidianConfig;
 use crate::ops::{is_page, read_text};
 use crate::vault::Vault;
 
@@ -281,6 +282,7 @@ impl Vault {
 	/// visible file participates in `duplicate_stems`.
 	pub fn doctor(&self, opts: &DoctorOptions) -> Result<HealthReport, WikidError> {
 		let files = self.visible_files()?;
+		let config = ObsidianConfig::load(self.root());
 		let mut page_inputs = Vec::new();
 		let mut aliases = Vec::new();
 		for (i, (rel, abs)) in files.iter().enumerate() {
@@ -308,7 +310,11 @@ impl Vault {
 				block_anchors(&text),
 			));
 		}
-		let index = LinkIndex::build(files.iter().map(|(rel, _)| rel.clone()).collect(), &aliases);
+		let index = LinkIndex::build(
+			files.iter().map(|(rel, _)| rel.clone()).collect(),
+			&aliases,
+			config.attachment_folder,
+		);
 		let pages: Vec<PageScan> = page_inputs
 			.into_iter()
 			.map(
@@ -1060,6 +1066,29 @@ mod tests {
 		let report = vault.doctor(&DoctorOptions::default()).unwrap();
 		assert_eq!(report.counts["broken_links"], 1);
 		assert!(report.issues.iter().all(|i| !i.path.contains("logo.png")));
+	}
+
+	#[test]
+	fn doctor_uses_obsidian_attachment_folder_for_duplicate_attachment_links() {
+		let (dir, vault) = test_fixtures::vault();
+		std::fs::write(
+			dir.path().join(".obsidian/app.json"),
+			r#"{"attachmentFolderPath":"assets"}"#,
+		)
+		.unwrap();
+		vault.write("assets/logo.png", "configured").unwrap();
+		vault.write("other/logo.png", "duplicate").unwrap();
+		vault.write("source.md", "![[logo.png]]\n").unwrap();
+
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenLinks, Check::AmbiguousLinks]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(report.counts["broken_links"], 0, "issues: {:?}", report.issues);
+		assert_eq!(report.counts["ambiguous_links"], 0, "issues: {:?}", report.issues);
 	}
 
 	#[test]

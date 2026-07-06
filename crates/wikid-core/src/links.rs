@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WikidError;
 use crate::frontmatter;
+use crate::obsidian_config::ObsidianConfig;
 use crate::ops::{is_page, read_text};
 use crate::paths;
 use crate::vault::Vault;
@@ -265,12 +266,18 @@ pub(crate) struct LinkIndex {
 	by_name: BTreeMap<String, Vec<usize>>,
 	/// Lowercased frontmatter alias → indices into `files`.
 	by_alias: BTreeMap<String, Vec<usize>>,
+	/// Optional Obsidian attachment folder used to prefer configured assets.
+	attachment_folder: Option<String>,
 }
 
 impl LinkIndex {
 	/// Builds the index from the vault-relative paths of all visible files and
 	/// per-file frontmatter aliases.
-	pub(crate) fn build(files: Vec<String>, aliases: &[(usize, Vec<String>)]) -> Self {
+	pub(crate) fn build(
+		files: Vec<String>,
+		aliases: &[(usize, Vec<String>)],
+		attachment_folder: Option<String>,
+	) -> Self {
 		let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
 		for (i, rel) in files.iter().enumerate() {
 			let name = rel.rsplit('/').next().unwrap_or(rel).to_lowercase();
@@ -290,6 +297,7 @@ impl LinkIndex {
 			files,
 			by_name,
 			by_alias,
+			attachment_folder,
 		}
 	}
 
@@ -310,6 +318,9 @@ impl LinkIndex {
 		let with_md = format!("{rel}.md");
 		if self.files.contains(&with_md) {
 			return Resolution::Resolved(with_md);
+		}
+		if let Some(configured_attachment) = self.configured_attachment_candidate(&rel) {
+			return Resolution::Resolved(configured_attachment);
 		}
 		if !rel.contains('/') {
 			let candidates: Vec<String> = match self.by_name.get(&rel.to_lowercase()) {
@@ -344,6 +355,15 @@ impl LinkIndex {
 			.map(|indices| indices.iter().map(|&i| self.files[i].clone()).collect())
 			.unwrap_or_default()
 	}
+
+	fn configured_attachment_candidate(&self, rel: &str) -> Option<String> {
+		let folder = self.attachment_folder.as_deref()?;
+		if rel == folder || rel.starts_with(&format!("{folder}/")) {
+			return None;
+		}
+		let candidate = format!("{folder}/{rel}");
+		self.files.contains(&candidate).then_some(candidate)
+	}
 }
 
 /// Maps a candidate set to a resolution: none = broken, one = resolved,
@@ -374,6 +394,7 @@ impl Vault {
 			});
 		}
 		let files = self.visible_files()?;
+		let config = ObsidianConfig::load(self.root());
 		let mut page_links = Vec::new();
 		let mut aliases = Vec::new();
 		for (i, (rel, abs)) in files.iter().enumerate() {
@@ -391,7 +412,11 @@ impl Vault {
 			}
 			page_links.push((rel.clone(), extract_links(&text)));
 		}
-		let index = LinkIndex::build(files.iter().map(|(rel, _)| rel.clone()).collect(), &aliases);
+		let index = LinkIndex::build(
+			files.iter().map(|(rel, _)| rel.clone()).collect(),
+			&aliases,
+			config.attachment_folder,
+		);
 		let mut outgoing = Vec::new();
 		let mut backlinks = Vec::new();
 		for (rel, extracted) in page_links {
@@ -615,11 +640,23 @@ mod tests {
 	}
 
 	fn index_with_aliases(files: &[&str], aliases: &[(usize, Vec<&str>)]) -> LinkIndex {
+		index_with_aliases_and_attachment_folder(files, aliases, None)
+	}
+
+	fn index_with_aliases_and_attachment_folder(
+		files: &[&str],
+		aliases: &[(usize, Vec<&str>)],
+		attachment_folder: Option<&str>,
+	) -> LinkIndex {
 		let aliases: Vec<(usize, Vec<String>)> = aliases
 			.iter()
 			.map(|(i, values)| (*i, values.iter().map(|value| value.to_string()).collect()))
 			.collect();
-		LinkIndex::build(files.iter().map(|f| f.to_string()).collect(), &aliases)
+		LinkIndex::build(
+			files.iter().map(|f| f.to_string()).collect(),
+			&aliases,
+			attachment_folder.map(str::to_string),
+		)
 	}
 
 	#[test]
@@ -649,6 +686,25 @@ mod tests {
 			Resolution::Resolved("attachments/logo.png".into())
 		);
 		assert_eq!(idx.resolve("logo"), Resolution::Resolved("attachments/logo.png".into()));
+	}
+
+	#[test]
+	fn configured_attachment_folder_wins_for_unqualified_attachments() {
+		let idx = index_with_aliases_and_attachment_folder(
+			&["attachments/logo.png", "other/logo.png", "notes/a.md"],
+			&[],
+			Some("attachments"),
+		);
+		assert_eq!(
+			idx.resolve("logo.png"),
+			Resolution::Resolved("attachments/logo.png".into())
+		);
+	}
+
+	#[test]
+	fn configured_attachment_folder_is_ignored_when_candidate_is_absent() {
+		let idx = index_with_aliases_and_attachment_folder(&["other/logo.png", "notes/a.md"], &[], Some("attachments"));
+		assert_eq!(idx.resolve("logo.png"), Resolution::Resolved("other/logo.png".into()));
 	}
 
 	#[test]
@@ -819,6 +875,22 @@ mod tests {
 		assert_eq!(report.outgoing.len(), 1);
 		assert!(report.outgoing[0].embed);
 		assert_eq!(report.outgoing[0].resolved.as_deref(), Some("attachments/logo.png"));
+	}
+
+	#[test]
+	fn obsidian_attachment_folder_resolves_configured_duplicate_attachment() {
+		let (dir, vault) = test_fixtures::vault();
+		std::fs::write(
+			dir.path().join(".obsidian/app.json"),
+			r#"{"attachmentFolderPath":"assets"}"#,
+		)
+		.unwrap();
+		vault.write("assets/logo.png", "configured").unwrap();
+		vault.write("other/logo.png", "duplicate").unwrap();
+		vault.write("page.md", "![[logo.png]]\n").unwrap();
+		let report = vault.links("page.md").unwrap();
+		assert_eq!(report.outgoing.len(), 1);
+		assert_eq!(report.outgoing[0].resolved.as_deref(), Some("assets/logo.png"));
 	}
 
 	#[test]
