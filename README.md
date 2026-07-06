@@ -139,6 +139,7 @@ Every command works identically in local and remote mode, and every command take
 
 | Command | What it does |
 |---|---|
+| `skills` | Embedded agent usage guides: list, print, or materialize version-matched SKILL.md files |
 | `status` | Page counts, recent activity, health summary — the no-arg default |
 | `ls` / `tree` / `glob` | Find pages by path |
 | `cat` | Read a page or `#Heading` / `#^block-id` fragment (large whole-page reads truncated with a size hint; `--full` or `--lines START-END` to override) |
@@ -154,15 +155,26 @@ Output follows the [AXI principles](https://axi.md/) for agent-facing CLIs: toke
 
 ## Giving your agents the wiki
 
-Because the surface is just a CLI, wiring an agent up is a paragraph in your `CLAUDE.md` / `AGENTS.md`, not a plugin:
+wikid ships agent usage guides inside the binary, so the instructions are always version-matched with the installed CLI:
+
+```sh
+wikid skills
+wikid skills get core
+wikid skills get core --full
+```
+
+A minimal `CLAUDE.md` / `AGENTS.md` pointer can stay short:
 
 ```markdown
 ## Shared wiki
 
-A team knowledge base is available via the `wikid` CLI ($WIKID_SERVER,
-$WIKID_TOKEN, $WIKID_WIKI are set). Before starting work, `wikid grep`
-for prior notes on the topic. Record durable findings with `wikid write`
-/ `wikid edit`, and link related pages with [[wikilinks]].
+Before using wikid, run `wikid skills get core` and follow that guide.
+```
+
+To expose the embedded guide as a Claude Code skill, materialize it and symlink the skill directory:
+
+```sh
+ln -s "$(wikid skills path core)" ~/.claude/skills/wikid-core
 ```
 
 `examples/llm-wiki/` is a small public-safe demo vault showing the full pattern — raw-source intake, compiled concept pages, an index, a log, and clean wikilinks:

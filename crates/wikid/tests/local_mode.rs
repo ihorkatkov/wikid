@@ -1227,3 +1227,60 @@ fn dir_flag_accepts_relative_paths() {
 		.success()
 		.stdout(predicate::str::contains("pages: 4"));
 }
+
+#[test]
+fn skills_are_client_side_and_json_shapes_are_stable() {
+	let list = json_of(wikid_untargeted().arg("skills").arg("--json"));
+	assert_eq!(list["skills"][0]["name"], "core");
+	assert!(list["skills"][0]["description"].as_str().unwrap().contains("wikid"));
+
+	let get = json_of(wikid_untargeted().arg("skills").arg("get").arg("core").arg("--json"));
+	assert_eq!(get["name"], "core");
+	assert_eq!(get["full"], false);
+	assert!(get["content"].as_str().unwrap().starts_with("---\nname: wikid-core\n"));
+
+	let full = stdout_of(wikid_untargeted().arg("skills").arg("get").arg("core").arg("--full"));
+	assert!(full.contains("# Reference: json-shapes"));
+	assert!(full.contains("# Reference: doctor-checks"));
+	assert!(full.contains("# Reference: link-resolution"));
+}
+
+#[test]
+fn skills_path_materializes_versioned_tree_and_current_symlink() {
+	let data = TempDir::new().unwrap();
+	let mut cmd = wikid_untargeted();
+	cmd.env("XDG_DATA_HOME", data.path())
+		.arg("skills")
+		.arg("path")
+		.arg("core");
+	let path = stdout_of(&mut cmd).trim().to_owned();
+	let skill_dir = PathBuf::from(&path);
+	assert!(skill_dir.join("SKILL.md").is_file());
+	assert!(skill_dir.join("references/json-shapes.md").is_file());
+	let version_dir = skill_dir.parent().unwrap();
+	assert!(version_dir.join("llm-wiki/SKILL.md").is_file());
+	assert!(version_dir.join(".complete").is_file());
+	assert!(version_dir.parent().unwrap().join("current").exists());
+
+	let path_again = stdout_of(
+		wikid_untargeted()
+			.env("XDG_DATA_HOME", data.path())
+			.arg("skills")
+			.arg("path")
+			.arg("core"),
+	);
+	assert_eq!(path_again.trim(), path);
+}
+
+#[test]
+fn unknown_skill_is_structured_not_found() {
+	wikid_untargeted()
+		.arg("skills")
+		.arg("get")
+		.arg("cor")
+		.assert()
+		.failure()
+		.code(1)
+		.stdout(predicate::str::contains("error[not_found]: skill not found: cor"))
+		.stdout(predicate::str::contains("hint: did you mean core?"));
+}

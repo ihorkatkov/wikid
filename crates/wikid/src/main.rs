@@ -7,6 +7,7 @@
 mod error;
 mod remote;
 mod render;
+mod skills;
 mod update;
 
 use std::io::{Read, Write};
@@ -28,7 +29,13 @@ use crate::remote::Remote;
 /// Point `wikid serve` at one or more wiki directories (Obsidian vaults
 /// included) and every agent gets filesystem-feeling access over CLI and MCP.
 #[derive(Parser)]
-#[command(name = "wikid", version, about, arg_required_else_help = false)]
+#[command(
+	name = "wikid",
+	version,
+	about,
+	arg_required_else_help = false,
+	before_help = "Start here (for AI agents):\n  wikid skills get core\n\n  Usage guides ship inside this binary — always version-matched. They\n  cover the read→edit hash protocol, wikilink resolution, tags, doctor,\n  and remote mode. Prefer them over guessing from the flag list below.\n  `wikid skills` lists all guides.\n"
+)]
 struct Cli {
 	/// Local wiki directory (or $WIKID_DIR)
 	#[arg(long, global = true, value_name = "PATH", conflicts_with = "server")]
@@ -60,16 +67,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+	/// List and print embedded agent usage guides
+	#[command(display_order = 0)]
+	Skills {
+		#[command(subcommand)]
+		command: Option<SkillsCommand>,
+	},
 	/// Run the daemon serving configured wikis
+	#[command(display_order = 10)]
 	Serve,
 	/// Initialize a blank LLM Wiki skeleton and register it in config
+	#[command(display_order = 20)]
 	Init { path: Option<String> },
 	/// Show configured tokens (explicit secret-revealing commands)
+	#[command(display_order = 30)]
 	Token {
 		#[command(subcommand)]
 		command: TokenCommand,
 	},
 	/// Update the installed wikid binary from GitHub releases
+	#[command(display_order = 40)]
 	Update {
 		/// Check whether an update is available without installing it
 		#[arg(long)]
@@ -82,6 +99,7 @@ enum Command {
 		version: Option<String>,
 	},
 	/// Show page counts, recent activity, and health summary
+	#[command(display_order = 50)]
 	Status,
 	/// List pages and directories
 	Ls { path: Option<String> },
@@ -179,6 +197,21 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum SkillsCommand {
+	/// List embedded usage guides
+	List,
+	/// Print a usage guide
+	Get {
+		name: String,
+		/// Append reference documents after SKILL.md
+		#[arg(long)]
+		full: bool,
+	},
+	/// Materialize embedded usage guides and print their path
+	Path { name: Option<String> },
+}
+
+#[derive(Subcommand)]
 enum TokenCommand {
 	/// Print the token for an actor from the local config
 	Show { actor: Option<String> },
@@ -226,6 +259,7 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 	// AXI checklist item 1: no arguments shows live data, never help text.
 	let command = cli.command.unwrap_or(Command::Status);
 	let command = match command {
+		Command::Skills { command } => return run_skills(command, cli.json),
 		Command::Serve => return run_serve(cli.config.as_deref(), cli.json),
 		Command::Init { path } => return run_init(path.as_deref(), cli.config.as_deref(), cli.json),
 		Command::Token { command } => return run_token(command, cli.config.as_deref(), cli.json),
@@ -340,6 +374,23 @@ fn run_init(path: Option<&str>, config_arg: Option<&str>, json: bool) -> Result<
 fn run_update(check: bool, force: bool, version: Option<&str>, json: bool) -> Result<Outcome, CliError> {
 	let result = update::run(check, force, version)?;
 	Ok(Outcome::ok(emit(json, &result, || update::render(&result))))
+}
+
+fn run_skills(command: Option<SkillsCommand>, json: bool) -> Result<Outcome, CliError> {
+	match command.unwrap_or(SkillsCommand::List) {
+		SkillsCommand::List => {
+			let result = skills::list()?;
+			Ok(Outcome::ok(emit(json, &result, || skills::render_list(&result))))
+		}
+		SkillsCommand::Get { name, full } => {
+			let result = skills::get(&name, full)?;
+			Ok(Outcome::ok(emit(json, &result, || result.content.clone())))
+		}
+		SkillsCommand::Path { name } => {
+			let result = skills::materialize(name.as_deref())?;
+			Ok(Outcome::ok(emit(json, &result, || result.path.clone())))
+		}
+	}
 }
 
 fn run_token(command: TokenCommand, config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> {
@@ -710,15 +761,7 @@ This directory is a blank LLM Wiki: a plain-Markdown knowledge base maintained b
 
 ## wikid CLI
 
-- `wikid status` shows the selected wiki's overview.
-- `wikid grep <pattern>` searches wiki content.
-- `wikid cat <path>` reads a page.
-- `wikid links <path>` shows outgoing links and backlinks.
-- `wikid doctor` checks structural health.
-- `wikid serve` exposes registered wikis over HTTP.
-- `wikid edit-batch <path>` reads a JSON array of hash-guarded line edits from stdin for multiple safe replacements in one file.
-
-Paths are wiki-root-relative, even when the shell cwd is inside a subdirectory of the wiki. In remote mode, `status` shows `root (server): ...`; that path belongs to the machine running `wikid serve`, not the client shell.
+Run `wikid skills get core` before using the CLI; it is the version-matched usage guide for reading, editing, linking, tags, doctor, and remote mode.
 "#;
 
 /// The targeted wiki: a local directory or a remote daemon. Both expose the
@@ -874,9 +917,11 @@ fn md_extension_hint(vault: &Vault, requested: &str) -> Option<String> {
 
 fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, CliError> {
 	match command {
-		Command::Serve | Command::Init { .. } | Command::Token { .. } | Command::Update { .. } => {
-			unreachable!("handled in run()")
-		}
+		Command::Skills { .. }
+		| Command::Serve
+		| Command::Init { .. }
+		| Command::Token { .. }
+		| Command::Update { .. } => unreachable!("handled in run()"),
 		Command::Status => {
 			let status = backend.status()?;
 			Ok(Outcome::ok(emit(json, &status, || {
@@ -1042,5 +1087,18 @@ mod tests {
 		assert!(parse_checks("").unwrap().is_empty());
 		let err = parse_checks("nonsense").unwrap_err();
 		assert_eq!(err.code, "bad_pattern");
+	}
+
+	#[test]
+	fn core_skill_mentions_every_clap_subcommand() {
+		let core = skills::find("core").unwrap();
+		let content = skills::content(core, true);
+		for subcommand in Cli::command().get_subcommands() {
+			let name = subcommand.get_name();
+			if name == "help" {
+				continue;
+			}
+			assert!(content.contains(name), "core skill must mention subcommand {name}");
+		}
 	}
 }

@@ -73,7 +73,7 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), categor
 
 **Targeting.** Local mode: `--dir <path>` or `$WIKID_DIR`. Remote mode: `--server <url>` + `--token <t>` + `--wiki <name>` or `$WIKID_SERVER`/`$WIKID_TOKEN`/`$WIKID_WIKI`. Explicit flags win over env; opposite-mode env vars are ignored when an explicit local/remote flag is present. Env-only local+remote targets → usage error. If neither local nor remote targeting is selected, commands fall back to config discovery (`--config`, `$WIKID_CONFIG`, `./wikid.toml`, `~/.config/wikid/config.toml`) and use local mode by choosing the registered wiki whose canonical path contains cwd (longest prefix), else the only registered wiki, else `default_wiki`. Multiple registered wikis with no valid default → structured `ambiguous_wiki` listing names and hinting to set `default_wiki` or pass a target. Remote mode maps commands 1:1 onto the HTTP API and renders identically (deserializes the shared core structs). `--wiki` is required in remote mode (missing → structured `no_wiki` error); `--token` is optional so auth-less loopback daemons work. HTTP error bodies re-render verbatim as the same `error[<code>]` with exit 1; connection/decode failures use the CLI-level `transport` code, unrecognized error bodies `http`.
 
-**Output.** Human-readable compact text by default; `--json` on every command emits the core result struct as JSON (one object, stdout). Errors (both modes): stdout, exit 1, format `error[<code>]: <message>` + optional `hint: …` line; `--json` errors: `{"error":{"code","message","hint"}}`. Usage errors: clap default (exit 2).
+**Output.** Human-readable compact text by default; `--json` on every command emits the core result struct as JSON (one object, stdout). Client-side CLI-only commands such as `skills` emit their own stable structs. Errors (both modes): stdout, exit 1, format `error[<code>]: <message>` + optional `hint: …` line; `--json` errors: `{"error":{"code","message","hint"}}`. Usage errors: clap default (exit 2).
 
 **AXI conformance checklist** (each item is a test):
 1. `wikid` with no args = `status` — live data, never help text.
@@ -86,7 +86,10 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), categor
 
 **Commands and flags** (coreutils-faithful; unknown flags fail with exit 2 and clap's suggestion):
 
-- `init [path]` — create a blank LLM Wiki scaffold and register it in config. It creates `index.md`, `log.md`, `AGENTS.md`, and `raw/`, `raw/assets/`, `concepts/`, `entities/`, `questions/`, `syntheses/`; never overwrites existing files; works in non-empty directories and Obsidian vaults; writes/updates config idempotently.
+- `skills [list]` — client-side catalog of embedded agent usage guides. Human output is `name — description`, wrapped near 72 columns, followed by `total: N guides` and the hint line ``hint: `wikid skills get core` to read one; add --full for the complete reference``. JSON shape: `{skills:[{name, description}]}`. This command never targets a wiki and does not contact the server.
+- `skills get <name> [--full]` — print the embedded `SKILL.md` verbatim, including YAML frontmatter. `--full` appends each reference document after the body, introduced by `# Reference: <title>`. JSON shape: `{name, full, content}` where `content` is the exact human text that would have been printed. Unknown names return structured `not_found` with a did-you-mean hint.
+- `skills path [<name>]` — materialize all embedded skills to `$XDG_DATA_HOME/wikid/skills/<version>/`, falling back to `~/.local/share/wikid/skills/<version>/`; on macOS, honor XDG only when set and otherwise use the same fallback for stable cross-platform symlinks. The layout mirrors repo `skills/` (`core/SKILL.md`, `core/references/*.md`, `llm-wiki/SKILL.md`). Writes are idempotent: if the version dir exists with `.complete`, no files are rewritten. Otherwise the CLI writes a temp dir and renames it into place. It also maintains a `current` symlink in `.../wikid/skills/` pointing at the version dir and leaves old version dirs in place. Human output is the version dir, or `<version dir>/<name>` when named. JSON shape: `{path, version}`.
+- `init [path]` — create a blank LLM Wiki scaffold and register it in config. It creates `index.md`, `log.md`, `AGENTS.md`, and `raw/`, `raw/assets/`, `concepts/`, `entities/`, `questions/`, `syntheses/`; never overwrites existing files; works in non-empty directories and Obsidian vaults; writes/updates config idempotently. Generated `AGENTS.md` points agents at `wikid skills get core` instead of inlining CLI usage prose.
 - `token show [actor]` — explicit secret-revealing local command. Defaults to `admin`; prints exactly one matching token or errors on none/multiple. JSON shape: `{actor, token, config_path}`.
 - `update` `--check` `--force` `--version <vX.Y.Z>` — explicit self-update for the installed `wikid` binary. It queries GitHub releases, selects the raw `wikid-<target>` asset for the current supported target, verifies the sibling `.sha256`, writes a temp file next to the current executable, chmods it executable, and atomically renames it over the current binary. No background checks, no cache, no prompts, no remote daemon update. JSON shape: `{current, target, action, updated, asset?}`.
 - `status`
@@ -103,6 +106,18 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), categor
 - `tags`
 - `doctor` `--stale-days <n>` `--checks <a,b,c>` `--profile <llm-wiki|strict>`
 - `serve` `--config <path>` (discovery: `--config` → `$WIKID_CONFIG` → `./wikid.toml` → `~/.config/wikid/config.toml`; write target for bootstrap/mutation: explicit/env path even if absent, else existing `./wikid.toml`, else global config)
+
+**Embedded skills.** Source files live in the top-level repo `skills/` directory and are compiled into the `wikid` binary with an `include_str!` static registry in `crates/wikid/src/skills.rs`:
+
+```rust
+pub struct Skill {
+    pub name: &'static str,
+    pub body: &'static str,
+    pub references: &'static [(&'static str, &'static str)],
+}
+```
+
+Tier-1 descriptions are parsed from each `SKILL.md` YAML frontmatter at runtime with `serde_yaml`; descriptions are not duplicated in Rust. Root clap help uses `before_help` to show the AI-agent start-here block, and `skills` has the first display order in the command list. Guard tests require valid frontmatter for every registered skill and require every clap subcommand name to appear in the core skill body plus references.
 
 ## 7. HTTP API (`wikid-server`)
 
