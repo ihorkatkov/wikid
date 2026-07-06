@@ -34,7 +34,7 @@ use crate::remote::Remote;
 	version,
 	about,
 	arg_required_else_help = false,
-	before_help = "Start here (for AI agents):\n  wikid skills get core\n\n  Usage guides ship inside this binary — always version-matched. They\n  cover the read→edit hash protocol, wikilink resolution, tags, doctor,\n  and remote mode. Prefer them over guessing from the flag list below.\n  `wikid skills` lists all guides.\n"
+	before_help = "Start here (for AI agents):\n  wikid skills get core\n\n  Usage guides ship inside this binary — always version-matched. They\n  cover the read→edit hash protocol, wikilink resolution, tags, doctor,\n  and remote mode. Prefer them over guessing from the flag list below.\n  `wikid skills` lists all guides (core, llm-wiki).\n"
 )]
 struct Cli {
 	/// Local wiki directory (or $WIKID_DIR)
@@ -68,7 +68,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
 	/// List and print embedded agent usage guides
-	#[command(display_order = 0)]
+	#[command(
+		display_order = 0,
+		long_about = "List and print embedded agent usage guides. Guides are embedded in the binary; wiki target flags are ignored."
+	)]
 	Skills {
 		#[command(subcommand)]
 		command: Option<SkillsCommand>,
@@ -201,7 +204,9 @@ enum SkillsCommand {
 	/// List embedded usage guides
 	List,
 	/// Print a usage guide
+	#[command(long_about = "Print a usage guide. Guides are embedded in the binary; wiki target flags are ignored.")]
 	Get {
+		#[arg(value_name = "NAME", help = skills::skill_name_help())]
 		name: String,
 		/// Append reference documents after SKILL.md
 		#[arg(long)]

@@ -1,6 +1,7 @@
 //! Embedded agent usage guides for `wikid skills`.
 
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -125,15 +126,31 @@ pub fn materialize(name: Option<&str>) -> Result<SkillPathResult, CliError> {
 }
 
 pub fn render_list(result: &SkillListResult) -> String {
+	render_list_at_width(result, catalog_width())
+}
+
+fn render_list_at_width(result: &SkillListResult, width: usize) -> String {
 	let mut lines = Vec::new();
 	for skill in &result.skills {
 		let prefix = format!("{} — ", skill.name);
-		lines.extend(wrap_with_prefix(&prefix, &skill.description, 72));
+		lines.extend(wrap_with_prefix(&prefix, &skill.description, width));
 	}
 	let guide_word = if result.skills.len() == 1 { "guide" } else { "guides" };
 	lines.push(format!("total: {} {guide_word}", result.skills.len()));
 	lines.push("hint: `wikid skills get core` to read one; add --full for the complete reference".to_owned());
 	lines.join("\n")
+}
+
+fn catalog_width() -> usize {
+	if std::io::stdout().is_terminal() {
+		std::env::var("COLUMNS")
+			.ok()
+			.and_then(|value| value.parse::<usize>().ok())
+			.unwrap_or(100)
+			.clamp(40, 120)
+	} else {
+		72
+	}
 }
 
 fn write_all(root: &Path) -> Result<(), CliError> {
@@ -195,6 +212,14 @@ fn skills_data_dir() -> Result<PathBuf, CliError> {
 
 fn env_nonempty(name: &str) -> Option<String> {
 	std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+pub fn skill_name_help() -> String {
+	format!("Guide to print [possible values: {}]", skill_names().join(", "))
+}
+
+fn skill_names() -> Vec<&'static str> {
+	SKILLS.iter().map(|skill| skill.name).collect()
 }
 
 pub fn find(name: &str) -> Result<&'static Skill, CliError> {
@@ -323,6 +348,24 @@ mod tests {
 		let err = find("cor").unwrap_err();
 		assert_eq!(err.code, "not_found");
 		assert_eq!(err.hint.as_deref(), Some("did you mean core?"));
+	}
+
+	#[test]
+	fn wrap_with_prefix_respects_width_and_hanging_indent() {
+		let text = "one two three four five six seven";
+		assert_eq!(
+			wrap_with_prefix("core — ", text, 20),
+			vec![
+				"core — one two",
+				"         three four",
+				"         five six",
+				"         seven"
+			]
+		);
+		assert_eq!(
+			wrap_with_prefix("core — ", text, 40),
+			vec!["core — one two three four five six", "         seven"]
+		);
 	}
 
 	#[test]

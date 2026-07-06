@@ -171,7 +171,7 @@ A minimal `CLAUDE.md` / `AGENTS.md` pointer can stay short:
 Before using wikid, run `wikid skills get core` and follow that guide.
 ```
 
-To expose the embedded guide as a Claude Code skill, materialize it and symlink the skill directory:
+To expose the embedded guide as a Claude Code skill, materialize it and symlink the skill directory; the CLI guide name is `core`, while the skill frontmatter name (and conventional symlink name) is `wikid-core`:
 
 ```sh
 ln -s "$(wikid skills path core)" ~/.claude/skills/wikid-core

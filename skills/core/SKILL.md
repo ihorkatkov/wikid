@@ -124,8 +124,8 @@ hint: wikid cat concepts/billing.md — verify the change
 If someone changed the line first, wikid refuses the whole edit:
 
 ```text
-error[stale_edit]: stale edit in concepts/billing.md: line 11 hash mismatch
-hint: re-read with cat --hashes before retrying the edit
+error[stale_edit]: stale edit in <page>.md: line 3 is now 1d79bf60835e ("THREE"), not 8b5b9db0c13d
+hint: the page changed since it was read — run cat <page>.md with hashes and retry with fresh line hashes
 ```
 
 Feedback loop: stale hash → re-read with `wikid cat <page>.md --hashes --lines N-M` → retry with the new hash.
