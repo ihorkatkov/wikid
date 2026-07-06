@@ -136,8 +136,16 @@ fn render_list_at_width(result: &SkillListResult, width: usize) -> String {
 		lines.extend(wrap_with_prefix(&prefix, &skill.description, width));
 	}
 	let guide_word = if result.skills.len() == 1 { "guide" } else { "guides" };
-	lines.push(format!("total: {} {guide_word}", result.skills.len()));
-	lines.push("hint: `wikid skills get core` to read one; add --full for the complete reference".to_owned());
+	lines.extend(wrap_with_prefix(
+		"total: ",
+		&format!("{} {guide_word}", result.skills.len()),
+		width,
+	));
+	lines.extend(wrap_with_prefix(
+		"hint: ",
+		"`wikid skills get core` to read one; add --full for the complete reference",
+		width,
+	));
 	lines.join("\n")
 }
 
@@ -366,6 +374,21 @@ mod tests {
 			wrap_with_prefix("core — ", text, 40),
 			vec!["core — one two three four five six", "         seven"]
 		);
+	}
+
+	#[test]
+	fn rendered_catalog_respects_width_for_every_line() {
+		let result = list().unwrap();
+		for width in [40, 72, 120] {
+			let rendered = render_list_at_width(&result, width);
+			for line in rendered.lines() {
+				let len = line.chars().count();
+				assert!(
+					len <= width,
+					"line is {len} chars at width {width}: {line:?}\n{rendered}"
+				);
+			}
+		}
 	}
 
 	#[test]

@@ -626,6 +626,98 @@ fn explicit_local_flag_ignores_remote_env_and_explicit_remote_ignores_dir_env() 
 		.stdout(predicate::str::starts_with("error[transport]:"));
 }
 
+fn assert_llm_scaffold(root: &Path) {
+	for path in [
+		"index.md",
+		"log.md",
+		"AGENTS.md",
+		"raw",
+		"raw/assets",
+		"concepts",
+		"entities",
+		"questions",
+		"syntheses",
+	] {
+		assert!(root.join(path).exists(), "missing {path}");
+	}
+}
+
+fn assert_no_llm_scaffold(root: &Path) {
+	for path in [
+		"index.md",
+		"log.md",
+		"AGENTS.md",
+		"raw",
+		"concepts",
+		"entities",
+		"questions",
+		"syntheses",
+	] {
+		assert!(!root.join(path).exists(), "unexpected scaffold path {path}");
+	}
+}
+
+#[test]
+fn init_global_dir_targets_directory_and_leaves_cwd_clean() {
+	let home = TempDir::new().unwrap();
+	let cwd = TempDir::new().unwrap();
+	let wiki = TempDir::new().unwrap();
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.current_dir(cwd.path())
+		.arg("--dir")
+		.arg(wiki.path())
+		.arg("init")
+		.assert()
+		.success()
+		.stdout(predicate::str::contains(format!(
+			"initialized wiki: {}",
+			wiki.path().canonicalize().unwrap().display()
+		)));
+	assert_llm_scaffold(wiki.path());
+	assert_no_llm_scaffold(cwd.path());
+	let config_path = home.path().join(".config/wikid/config.toml");
+	let config = wikid_server::Config::load(&config_path).unwrap();
+	let name = wiki.path().file_name().unwrap().to_str().unwrap();
+	assert_eq!(config.wikis[name], wiki.path().canonicalize().unwrap());
+}
+
+#[test]
+fn init_positional_path_beats_global_dir() {
+	let home = TempDir::new().unwrap();
+	let cwd = TempDir::new().unwrap();
+	let global_dir = TempDir::new().unwrap();
+	let positional = TempDir::new().unwrap();
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.current_dir(cwd.path())
+		.arg("--dir")
+		.arg(global_dir.path())
+		.arg("init")
+		.arg(positional.path())
+		.assert()
+		.success();
+	assert_llm_scaffold(positional.path());
+	assert_no_llm_scaffold(global_dir.path());
+	assert_no_llm_scaffold(cwd.path());
+}
+
+#[test]
+fn init_honors_wikid_dir_when_no_positional_or_global_dir() {
+	let home = TempDir::new().unwrap();
+	let cwd = TempDir::new().unwrap();
+	let wiki = TempDir::new().unwrap();
+	wikid_untargeted()
+		.env("HOME", home.path())
+		.env("WIKID_DIR", wiki.path())
+		.current_dir(cwd.path())
+		.arg("init")
+		.assert()
+		.success();
+	assert_llm_scaffold(wiki.path());
+	assert_no_llm_scaffold(cwd.path());
+}
+
 #[test]
 fn init_creates_skeleton_registers_config_and_is_idempotent() {
 	let home = TempDir::new().unwrap();
@@ -639,19 +731,7 @@ fn init_creates_skeleton_registers_config_and_is_idempotent() {
 		.stdout(predicate::str::contains("created:"))
 		.stdout(predicate::str::contains("registered:"))
 		.stdout(predicate::str::contains("not printed"));
-	for path in [
-		"index.md",
-		"log.md",
-		"AGENTS.md",
-		"raw",
-		"raw/assets",
-		"concepts",
-		"entities",
-		"questions",
-		"syntheses",
-	] {
-		assert!(wiki.path().join(path).exists(), "missing {path}");
-	}
+	assert_llm_scaffold(wiki.path());
 	let config_path = home.path().join(".config/wikid/config.toml");
 	let config = wikid_server::Config::load(&config_path).unwrap();
 	let name = wiki.path().file_name().unwrap().to_str().unwrap();

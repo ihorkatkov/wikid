@@ -273,7 +273,9 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 	let command = match command {
 		Command::Skills { command } => return run_skills(command, cli.json),
 		Command::Serve => return run_serve(cli.config.as_deref(), cli.json),
-		Command::Init { path } => return run_init(path.as_deref(), cli.config.as_deref(), cli.json),
+		Command::Init { path } => {
+			return run_init(path.as_deref(), cli.dir.as_deref(), cli.config.as_deref(), cli.json);
+		}
 		Command::Token { command } => return run_token(command, cli.config.as_deref(), cli.json),
 		Command::Update { check, force, version } => return run_update(check, force, version.as_deref(), cli.json),
 		other => other,
@@ -357,11 +359,13 @@ fn run_serve(config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> 
 	Ok(Outcome::ok("wikid-server stopped".to_owned()))
 }
 
-fn run_init(path: Option<&str>, config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> {
-	let root = match path {
-		Some(path) => PathBuf::from(path),
-		None => std::env::current_dir().map_err(io_error)?,
-	};
+fn run_init(
+	path: Option<&str>,
+	explicit_dir: Option<&str>,
+	config_arg: Option<&str>,
+	json: bool,
+) -> Result<Outcome, CliError> {
+	let root = resolve_init_root(path, explicit_dir)?;
 	std::fs::create_dir_all(&root).map_err(io_error)?;
 	let root = root.canonicalize().map_err(io_error)?;
 	let scaffold = create_skeleton(&root)?;
@@ -381,6 +385,19 @@ fn run_init(path: Option<&str>, config_arg: Option<&str>, json: bool) -> Result<
 		skipped: scaffold.skipped,
 	};
 	Ok(Outcome::ok(emit(json, &result, || render_init(&result))))
+}
+
+fn resolve_init_root(path: Option<&str>, explicit_dir: Option<&str>) -> Result<PathBuf, CliError> {
+	if let Some(path) = path {
+		return Ok(PathBuf::from(path));
+	}
+	if let Some(dir) = explicit_dir {
+		return Ok(PathBuf::from(dir));
+	}
+	if let Some(dir) = env_var("WIKID_DIR") {
+		return Ok(PathBuf::from(dir));
+	}
+	std::env::current_dir().map_err(io_error)
 }
 
 fn run_update(check: bool, force: bool, version: Option<&str>, json: bool) -> Result<Outcome, CliError> {
