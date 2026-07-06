@@ -882,6 +882,14 @@ fn links_reports_outgoing_and_backlinks() {
 }
 
 #[test]
+fn links_marks_embeds_in_human_output() {
+	let vault = fixture_vault();
+	fs::write(vault.path().join("index.md"), "# Home\n\n![[alpha]]\n").unwrap();
+	let out = stdout_of(wikid(vault.path()).args(["links", "index.md"]));
+	assert!(out.contains("embed ![[alpha]] → notes/alpha.md"), "embed marker: {out}");
+}
+
+#[test]
 fn doctor_filters_checks_and_rejects_unknown_names() {
 	let vault = fixture_vault();
 	let filtered = json_of(wikid(vault.path()).args(["doctor", "--checks", "broken_links", "--json"]));

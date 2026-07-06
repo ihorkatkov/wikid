@@ -27,12 +27,22 @@ pub enum LinkKind {
 pub struct Link {
 	/// The link exactly as written, e.g. `[[Note|alias]]`.
 	pub raw: String,
-	/// The resolution target after stripping alias and heading parts.
+	/// The resolution target after stripping alias and fragment parts.
 	pub target: String,
 	/// Vault-relative path the link resolves to; `None` when broken or ambiguous.
 	pub resolved: Option<String>,
 	/// Wikilink or markdown.
 	pub kind: LinkKind,
+	/// Whether the link was written as an embed/transclusion (`![[…]]` or `![…](…)`).
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub embed: bool,
+	/// Fragment after the first unescaped `#`, e.g. `Heading` or `^block-id`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fragment: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+	!*value
 }
 
 /// Result of `links`: a page's outgoing links and the pages linking back to it.
@@ -49,10 +59,14 @@ pub struct LinkReport {
 pub(crate) struct ExtractedLink {
 	/// The exact matched text.
 	pub raw: String,
-	/// The target with alias, heading, and anchor parts stripped.
+	/// The target with alias and fragment parts stripped.
 	pub target: String,
 	/// Wikilink or markdown.
 	pub kind: LinkKind,
+	/// Whether the link was written as an embed/transclusion.
+	pub embed: bool,
+	/// Fragment after the first unescaped `#`, e.g. `Heading` or `^block-id`.
+	pub fragment: Option<String>,
 }
 
 /// Outcome of resolving a single link target.
@@ -83,10 +97,11 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 	let mut found: Vec<(usize, ExtractedLink)> = Vec::new();
 	for caps in wikilink_re().captures_iter(content) {
 		let whole = caps.get(0).expect("capture 0");
-		// Alias splits first ([[target#heading|alias]]), then the heading.
+		// Alias splits first ([[target#heading|alias]]), then the fragment.
 		let inner = &caps[1];
 		let target = inner.split('|').next().unwrap_or(inner);
-		let target = target.split('#').next().unwrap_or(target).trim();
+		let (target, fragment) = split_fragment(target);
+		let target = target.trim();
 		if target.is_empty() {
 			continue;
 		}
@@ -96,6 +111,8 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 				raw: whole.as_str().to_string(),
 				target: target.to_string(),
 				kind: LinkKind::Wikilink,
+				embed: whole.as_str().starts_with('!'),
+				fragment,
 			},
 		));
 	}
@@ -115,7 +132,8 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 		{
 			continue;
 		}
-		let target = inner.split('#').next().unwrap_or(inner).trim();
+		let (target, fragment) = split_fragment(inner);
+		let target = target.trim();
 		if target.is_empty() || target.starts_with('/') {
 			continue;
 		}
@@ -127,6 +145,8 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 				// `My Note.md`. Wikilink targets stay literal.
 				target: percent_decode(target),
 				kind: LinkKind::Markdown,
+				embed: whole.as_str().starts_with('!'),
+				fragment,
 			},
 		));
 	}
@@ -138,6 +158,29 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 /// whitespace after the destination, e.g. `notes/guide.md "The Guide"` →
 /// `notes/guide.md`. A quoted string with nothing before it is a destination,
 /// not a title, and is left alone.
+fn split_fragment(target: &str) -> (&str, Option<String>) {
+	let Some(hash) = find_unescaped_hash(target) else {
+		return (target, None);
+	};
+	(&target[..hash], Some(target[hash + 1..].to_string()))
+}
+
+fn find_unescaped_hash(target: &str) -> Option<usize> {
+	let mut escaped = false;
+	for (i, ch) in target.char_indices() {
+		if escaped {
+			escaped = false;
+			continue;
+		}
+		match ch {
+			'\\' => escaped = true,
+			'#' => return Some(i),
+			_ => {}
+		}
+	}
+	None
+}
+
 fn strip_markdown_title(inner: &str) -> &str {
 	for quote in ['"', '\''] {
 		let Some(without_close) = inner.strip_suffix(quote) else {
@@ -299,6 +342,8 @@ impl Vault {
 							target: link.target,
 							resolved,
 							kind: link.kind,
+							embed: link.embed,
+							fragment: link.fragment,
 						}
 					})
 					.collect();
@@ -369,12 +414,41 @@ mod tests {
 		assert_eq!(links[0].raw, "![[logo.png]]");
 		assert_eq!(links[0].target, "logo.png");
 		assert_eq!(links[0].kind, LinkKind::Wikilink);
+		assert!(links[0].embed);
+		assert_eq!(links[0].fragment, None);
 	}
 
 	#[test]
-	fn markdown_fragment_is_stripped_for_resolution() {
+	fn plain_wikilinks_are_not_embeds() {
+		let links = extract_links("Plain: [[Note]]\n");
+		assert_eq!(links.len(), 1);
+		assert!(!links[0].embed);
+		assert_eq!(links[0].kind, LinkKind::Wikilink);
+	}
+
+	#[test]
+	fn wikilink_embeds_capture_fragments_without_changing_target() {
+		let links = extract_links("Embedded section: ![[Note#Section]]\n");
+		assert_eq!(links.len(), 1);
+		assert!(links[0].embed);
+		assert_eq!(links[0].target, "Note");
+		assert_eq!(links[0].fragment.as_deref(), Some("Section"));
+	}
+
+	#[test]
+	fn markdown_embeds_are_marked_as_embeds() {
+		let links = extract_links("![alt](img.png)\n");
+		assert_eq!(links.len(), 1);
+		assert_eq!(links[0].target, "img.png");
+		assert_eq!(links[0].kind, LinkKind::Markdown);
+		assert!(links[0].embed);
+	}
+
+	#[test]
+	fn markdown_fragment_is_stripped_for_resolution_and_captured() {
 		let links = extract_links("[s](notes/guide.md#setup)\n");
 		assert_eq!(links[0].target, "notes/guide.md");
+		assert_eq!(links[0].fragment.as_deref(), Some("setup"));
 	}
 
 	#[test]
@@ -542,6 +616,25 @@ mod tests {
 	}
 
 	#[test]
+	fn embeds_count_as_backlinks() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault.write("target.md", "# Target\n").unwrap();
+		vault.write("embedder.md", "![[target]]\n").unwrap();
+		let report = vault.links("target.md").unwrap();
+		assert!(report.backlinks.contains(&"embedder.md".to_string()), "{report:?}");
+	}
+
+	#[test]
+	fn attachment_embeds_resolve_and_are_not_broken() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault.write("page.md", "![[logo.png]]\n").unwrap();
+		let report = vault.links("page.md").unwrap();
+		assert_eq!(report.outgoing.len(), 1);
+		assert!(report.outgoing[0].embed);
+		assert_eq!(report.outgoing[0].resolved.as_deref(), Some("attachments/logo.png"));
+	}
+
+	#[test]
 	fn links_on_attachment_has_no_outgoing_but_backlinks_work() {
 		let (_dir, vault) = test_fixtures::knowledge_vault();
 		let report = vault.links("attachments/logo.png").unwrap();
@@ -602,7 +695,17 @@ mod tests {
 		let json = serde_json::to_string(&report).unwrap();
 		assert!(json.contains("\"kind\":\"wikilink\""));
 		assert!(json.contains("\"kind\":\"markdown\""));
+		assert!(json.contains("\"embed\":true"));
+		assert!(json.contains("\"fragment\":\"Setup\""));
 		let back: LinkReport = serde_json::from_str(&json).unwrap();
 		assert_eq!(report, back);
+	}
+
+	#[test]
+	fn old_link_json_defaults_embed_and_fragment() {
+		let json = r#"{"raw":"[[Note]]","target":"Note","resolved":null,"kind":"wikilink"}"#;
+		let link: Link = serde_json::from_str(json).unwrap();
+		assert!(!link.embed);
+		assert_eq!(link.fragment, None);
 	}
 }

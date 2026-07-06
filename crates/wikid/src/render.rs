@@ -247,7 +247,8 @@ pub fn links(report: &LinkReport) -> String {
 	let mut lines = vec![format!("outgoing: {}", report.outgoing.len())];
 	for link in &report.outgoing {
 		let resolved = link.resolved.as_deref().unwrap_or("(unresolved)");
-		lines.push(format!("  {} → {resolved}", link.raw));
+		let embed = if link.embed { "embed " } else { "" };
+		lines.push(format!("  {embed}{} → {resolved}", link.raw));
 	}
 	lines.push(format!("backlinks: {}", report.backlinks.len()));
 	for path in &report.backlinks {
@@ -365,6 +366,23 @@ mod tests {
 			out.ends_with("hint: wikid cat big.md --lines 1-120 — read a window"),
 			"{out}"
 		);
+	}
+
+	#[test]
+	fn links_marks_embeds_in_human_output() {
+		let report = LinkReport {
+			outgoing: vec![wikid_core::Link {
+				raw: "![[Target]]".to_string(),
+				target: "Target".to_string(),
+				resolved: Some("target.md".to_string()),
+				kind: wikid_core::LinkKind::Wikilink,
+				embed: true,
+				fragment: None,
+			}],
+			backlinks: vec![],
+		};
+		let out = links(&report);
+		assert!(out.contains("embed ![[Target]] → target.md"), "{out}");
 	}
 
 	#[test]
