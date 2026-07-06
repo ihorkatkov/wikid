@@ -318,18 +318,16 @@ fn json_output_parses_for_every_command() {
 }
 
 #[test]
-fn doctor_shows_yaml_parser_details_for_malformed_frontmatter() {
+fn doctor_shows_sanitized_yaml_details_for_malformed_frontmatter() {
 	let vault = TempDir::new().unwrap();
 	fs::write(vault.path().join("bad.md"), "---\ntitle: [unterminated\n---\n# Bad\n").unwrap();
 	let out = stdout_of(wikid(vault.path()).args(["doctor", "--checks", "malformed_frontmatter"]));
-	assert!(out.contains("frontmatter block is not valid YAML:"), "{out}");
-	assert!(out.contains("line"), "{out}");
-	assert!(out.contains("column"), "{out}");
+	assert!(out.contains("invalid YAML frontmatter (line"), "{out}");
+	assert!(!out.contains("column"), "{out}");
 	let json = json_of(wikid(vault.path()).args(["doctor", "--checks", "malformed_frontmatter", "--json"]));
 	let detail = json["issues"][0]["detail"].as_str().unwrap();
-	assert!(detail.contains("frontmatter block is not valid YAML:"), "{detail}");
-	assert!(detail.contains("line"), "{detail}");
-	assert!(detail.contains("column"), "{detail}");
+	assert!(detail.starts_with("invalid YAML frontmatter (line"), "{detail}");
+	assert!(!detail.contains("column"), "{detail}");
 }
 
 #[test]
@@ -353,6 +351,19 @@ fn json_errors_use_the_error_object_shape() {
 	assert_eq!(value["error"]["code"], "not_found");
 	assert!(value["error"]["message"].is_string());
 	assert!(value["error"]["hint"].is_string());
+}
+
+#[test]
+fn read_path_not_found_hints_when_md_extension_exists() {
+	let vault = fixture_vault();
+	fs::write(vault.path().join("Home.md"), "# Home\n").unwrap();
+	wikid(vault.path())
+		.args(["cat", "Home"])
+		.assert()
+		.code(1)
+		.stdout(predicate::str::contains("hint: did you mean Home.md?"));
+	let json = json_of(wikid(vault.path()).args(["links", "Home", "--json"]));
+	assert_eq!(json["error"]["hint"], "did you mean Home.md?");
 }
 
 // --- targeting: local dir, remote selection, serve config discovery ---
@@ -877,6 +888,17 @@ fn grep_bad_regex_is_a_structured_error() {
 		.assert()
 		.code(1)
 		.stdout(predicate::str::starts_with("error[bad_pattern]:"));
+}
+
+#[test]
+fn concise_help_documents_obsidian_fragments_embeds_and_tags() {
+	let cat_help = stdout_of(wikid_untargeted().args(["cat", "--help"]));
+	assert!(cat_help.contains("#Heading"), "{cat_help}");
+	assert!(cat_help.contains("#^block-id"), "{cat_help}");
+	let links_help = stdout_of(wikid_untargeted().args(["links", "--help"]));
+	assert!(links_help.contains("![[...]] has embed=true"), "{links_help}");
+	let tags_help = stdout_of(wikid_untargeted().args(["tags", "--help"]));
+	assert!(tags_help.contains("inline and frontmatter tags"), "{tags_help}");
 }
 
 #[test]

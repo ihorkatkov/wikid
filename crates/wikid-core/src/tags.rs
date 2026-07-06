@@ -80,7 +80,11 @@ pub fn extract_tags(content: &str) -> Vec<String> {
 			let tag = caps.get(1).expect("capture 1").as_str();
 			let line_pos = whole.start();
 			let absolute = offset + line_pos;
-			if in_ranges(absolute, &wikilinks) || in_ranges(line_pos, &code_spans) || preceded_by_word(line, line_pos) {
+			if in_ranges(absolute, &wikilinks)
+				|| in_ranges(line_pos, &code_spans)
+				|| preceded_by_word(line, line_pos)
+				|| escaped_hash(line, line_pos)
+			{
 				continue;
 			}
 			if !tag.chars().all(char::is_numeric) {
@@ -232,6 +236,10 @@ fn preceded_by_word(line: &str, hash: usize) -> bool {
 		.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
+fn escaped_hash(line: &str, hash: usize) -> bool {
+	line[..hash].ends_with('\\')
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -259,6 +267,11 @@ mod tests {
 	#[test]
 	fn tag_must_not_be_preceded_by_word_char() {
 		assert_eq!(extract_tags("word#no under_score#no (#yes)"), vec!["yes"]);
+	}
+
+	#[test]
+	fn escaped_hash_is_not_a_tag() {
+		assert_eq!(extract_tags(r"escaped \#foo but #bar"), vec!["bar"]);
 	}
 
 	#[test]

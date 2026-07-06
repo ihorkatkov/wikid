@@ -43,7 +43,7 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 
 - Extract `[[Target]]`, `[[Target|alias]]`, `[[Target#Heading]]`, `[[Target#^block-id]]`, embeds (`![[Target]]`, `![alt](relative/path)`), and markdown links `[text](relative/path.md)` (skip `http(s)://`, `mailto:`, anchors). Fragments are retained on links but ignored for target resolution.
 - Resolution, in order: (1) exact relative path from root (with/without `.md`); (2) if `.obsidian/app.json` has `attachmentFolderPath`, an exact file under that configured folder for the target; (3) unique file-stem match anywhere in the vault (case-insensitive); (4) unique path-suffix match (`folder/Note`); (5) unique frontmatter alias match from `aliases` (string or list, case-insensitive). Real root path matches win first; configured attachment-folder matches can disambiguate duplicate attachment filenames; file/path/stem matches win before aliases. Multiple candidates at a stage → unresolved + flagged `ambiguous` (doctor reports it). No match → broken link.
-- Frontmatter: leading `---\n…\n---` block parsed with `serde_yaml` into a string-keyed map. Absence is normal. Malformed YAML → treated as no frontmatter; doctor flags it and includes the `serde_yaml` parser/type error string in the issue detail.
+- Frontmatter: leading `---\n…\n---` block parsed with `serde_yaml` into a string-keyed map. Absence is normal. Malformed YAML → treated as no frontmatter; doctor flags it with a sanitized one-line YAML detail and line number when available.
 - Obsidian config: only `.obsidian/app.json`'s `attachmentFolderPath` is honored, via a targeted read of that known file. Missing `.obsidian/`, missing app.json, malformed JSON, or invalid paths degrade to no config; `.obsidian/` remains hidden from normal ls/tree/grep/page walks.
 - Page title: frontmatter `title` → first `# heading` → file stem.
 
@@ -56,12 +56,13 @@ All structural, no LLM. Each issue: `{check, severity (low/medium/high), categor
 | Check | Trigger | Severity |
 |---|---|---|
 | `broken_links` | link resolves to nothing | high |
-| `ambiguous_links` | stem matches >1 file | medium |
+| `ambiguous_links` | link target matches >1 file/stem/suffix; duplicate-alias ambiguity is reported by `duplicate_aliases` instead | medium |
+| `duplicate_aliases` | two or more pages claim the same case-insensitive frontmatter alias, even if no link references it | low |
 | `orphan_pages` | page with no inbound links, excluding root-level `index.md`/`README.md` | low |
 | `broken_block_reference` | resolved page link has a `#^block-id` fragment, but the target page has no trailing `^block-id` anchor | medium |
 | `broken_heading_reference` | resolved page link has a `#heading` fragment, but the target page has no matching ATX heading (case-insensitive trimmed text) | medium |
 | `missing_frontmatter` | only when ≥50% of pages have frontmatter (the vault "uses" it) — pages without it | low |
-| `malformed_frontmatter` | `---` block present but YAML parse/type-check fails; issue detail includes the YAML parser/type error string | medium |
+| `malformed_frontmatter` | `---` block present but YAML parse/type-check fails; issue detail is a sanitized one-liner like `invalid YAML frontmatter (line N): <reason>` | medium |
 | `stale_pages` | mtime older than `stale_days` (default 90) | low |
 | `oversized_pages` | > 64 KiB or > 1500 lines | medium |
 | `duplicate_stems` | same case-insensitive stem at multiple paths (breaks wikilink resolution); default `llm-wiki` profile keeps page/page as medium, page/asset as low, and suppresses asset/asset noise | medium/low |

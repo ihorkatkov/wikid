@@ -95,8 +95,10 @@ pub enum IssueCategory {
 pub enum Check {
 	/// A link resolves to nothing.
 	BrokenLinks,
-	/// A link's stem or suffix matches more than one file.
+	/// A link's stem, suffix, or alias matches more than one file.
 	AmbiguousLinks,
+	/// The same case-insensitive frontmatter alias appears on multiple pages.
+	DuplicateAliases,
 	/// A page no other page links to (root `index.md`/`README.md` excluded).
 	OrphanPages,
 	/// A `#^block-id` fragment points at a page without that block anchor.
@@ -117,9 +119,10 @@ pub enum Check {
 
 impl Check {
 	/// Every check, in report order.
-	pub const ALL: [Check; 10] = [
+	pub const ALL: [Check; 11] = [
 		Check::BrokenLinks,
 		Check::AmbiguousLinks,
+		Check::DuplicateAliases,
 		Check::OrphanPages,
 		Check::BrokenBlockReference,
 		Check::BrokenHeadingReference,
@@ -135,6 +138,7 @@ impl Check {
 		match self {
 			Check::BrokenLinks => "broken_links",
 			Check::AmbiguousLinks => "ambiguous_links",
+			Check::DuplicateAliases => "duplicate_aliases",
 			Check::OrphanPages => "orphan_pages",
 			Check::BrokenBlockReference => "broken_block_reference",
 			Check::BrokenHeadingReference => "broken_heading_reference",
@@ -151,6 +155,7 @@ impl Check {
 		match self {
 			Check::BrokenLinks => Severity::High,
 			Check::AmbiguousLinks => Severity::Medium,
+			Check::DuplicateAliases => Severity::Low,
 			Check::OrphanPages => Severity::Low,
 			Check::BrokenBlockReference => Severity::Medium,
 			Check::BrokenHeadingReference => Severity::Medium,
@@ -354,7 +359,8 @@ impl Vault {
 		for check in &enabled {
 			let mut found = match check {
 				Check::BrokenLinks => broken_links(&scoped_pages, opts.profile),
-				Check::AmbiguousLinks => ambiguous_links(&scoped_pages),
+				Check::AmbiguousLinks => ambiguous_links(&scoped_pages, &duplicate_alias_paths(&scoped_pages)),
+				Check::DuplicateAliases => duplicate_aliases(&scoped_pages),
 				Check::OrphanPages => orphan_pages(&scoped_pages),
 				Check::BrokenBlockReference => broken_block_references(&scoped_pages, &pages),
 				Check::BrokenHeadingReference => broken_heading_references(&scoped_pages, &pages),
@@ -408,6 +414,7 @@ fn category_for(check: Check, path: &str) -> IssueCategory {
 	match check {
 		Check::BrokenLinks
 		| Check::AmbiguousLinks
+		| Check::DuplicateAliases
 		| Check::OrphanPages
 		| Check::BrokenBlockReference
 		| Check::BrokenHeadingReference
@@ -592,26 +599,72 @@ fn broken_links(pages: &[PageScan], profile: DoctorProfile) -> Vec<Issue> {
 		.collect()
 }
 
-fn ambiguous_links(pages: &[PageScan]) -> Vec<Issue> {
+fn ambiguous_links(pages: &[PageScan], duplicate_aliases: &BTreeMap<String, Vec<String>>) -> Vec<Issue> {
 	pages
 		.iter()
 		.flat_map(|page| {
 			page.links.iter().filter_map(|(link, resolution)| match resolution {
-				Resolution::Ambiguous(candidates) => Some(issue(
-					Check::AmbiguousLinks,
-					&page.rel,
-					format!(
-						"{} matches {} files: {}",
-						link.raw,
-						candidates.len(),
-						candidates.join(", ")
-					),
-					"qualify the link with its folder, e.g. [[folder/name]]",
-				)),
+				Resolution::Ambiguous(candidates) if !is_duplicate_alias_link(link, candidates, duplicate_aliases) => {
+					Some(issue(
+						Check::AmbiguousLinks,
+						&page.rel,
+						format!(
+							"{} matches {} files: {}",
+							link.raw,
+							candidates.len(),
+							candidates.join(", ")
+						),
+						"qualify the link with its folder, e.g. [[folder/name]]",
+					))
+				}
 				_ => None,
 			})
 		})
 		.collect()
+}
+
+fn duplicate_aliases(pages: &[PageScan]) -> Vec<Issue> {
+	duplicate_alias_paths(pages)
+		.into_iter()
+		.map(|(alias, paths)| {
+			issue(
+				Check::DuplicateAliases,
+				&paths[0],
+				format!("alias '{alias}' is shared by {}", paths.join(", ")),
+				"remove or rename duplicate aliases so alias wikilinks resolve uniquely",
+			)
+		})
+		.collect()
+}
+
+fn duplicate_alias_paths(pages: &[PageScan]) -> BTreeMap<String, Vec<String>> {
+	let mut by_alias: BTreeMap<String, Vec<String>> = BTreeMap::new();
+	for page in pages {
+		for alias in frontmatter::aliases(&page.frontmatter) {
+			by_alias.entry(alias.to_lowercase()).or_default().push(page.rel.clone());
+		}
+	}
+	by_alias
+		.into_iter()
+		.filter_map(|(alias, mut paths)| {
+			paths.sort();
+			paths.dedup();
+			(paths.len() > 1).then_some((alias, paths))
+		})
+		.collect()
+}
+
+fn is_duplicate_alias_link(
+	link: &ExtractedLink,
+	candidates: &[String],
+	duplicate_aliases: &BTreeMap<String, Vec<String>>,
+) -> bool {
+	let Some(alias_paths) = duplicate_aliases.get(&link.target.to_lowercase()) else {
+		return false;
+	};
+	let mut candidates = candidates.to_vec();
+	candidates.sort();
+	&candidates == alias_paths
 }
 
 fn orphan_pages(pages: &[PageScan]) -> Vec<Issue> {
@@ -687,11 +740,40 @@ fn malformed_frontmatter(pages: &[PageScan]) -> Vec<Issue> {
 			Some(issue(
 				Check::MalformedFrontmatter,
 				&page.rel,
-				format!("frontmatter block is not valid YAML: {detail}"),
+				clean_yaml_error(detail),
 				"fix the YAML between the --- markers or remove the block",
 			))
 		})
 		.collect()
+}
+
+fn clean_yaml_error(detail: &str) -> String {
+	let detail = detail.trim().replace('\n', " ");
+	let Some((reason, location)) = detail.rsplit_once(" at line ") else {
+		return format!("invalid YAML frontmatter: {detail}");
+	};
+	let line = location
+		.split(|ch: char| !ch.is_ascii_digit())
+		.next()
+		.filter(|line| !line.is_empty());
+	let reason = strip_yaml_locations(reason.trim()).trim_end_matches('.').to_string();
+	match line {
+		Some(line) => format!("invalid YAML frontmatter (line {line}): {reason}"),
+		None => format!("invalid YAML frontmatter: {reason}"),
+	}
+}
+
+fn strip_yaml_locations(reason: &str) -> String {
+	let mut cleaned = reason.to_string();
+	while let Some(start) = cleaned.find(" at line ") {
+		let tail = &cleaned[start + " at line ".len()..];
+		let Some(comma) = tail.find(',') else {
+			cleaned.truncate(start);
+			break;
+		};
+		cleaned.replace_range(start..start + " at line ".len() + comma + 1, "");
+	}
+	cleaned.trim().to_string()
 }
 
 fn stale_pages(pages: &[PageScan], stale_days: u64) -> Vec<Issue> {
@@ -802,6 +884,7 @@ mod tests {
 		let expected: BTreeMap<&str, usize> = [
 			("broken_links", 1),
 			("ambiguous_links", 1),
+			("duplicate_aliases", 0),
 			("orphan_pages", 3),
 			("broken_block_reference", 0),
 			("broken_heading_reference", 0),
@@ -862,6 +945,7 @@ mod tests {
 		for check in [
 			"broken_links",
 			"ambiguous_links",
+			"duplicate_aliases",
 			"broken_block_reference",
 			"broken_heading_reference",
 			"missing_frontmatter",
@@ -1110,7 +1194,28 @@ mod tests {
 	}
 
 	#[test]
-	fn doctor_reports_alias_collisions_as_ambiguous_links() {
+	fn malformed_frontmatter_detail_is_sanitized() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("bad.md"), "---\ntitle: [bad\n---\n# Bad\n").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::MalformedFrontmatter]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		let issue = report.issues.first().unwrap();
+		assert!(
+			issue.detail.starts_with("invalid YAML frontmatter (line "),
+			"{}",
+			issue.detail
+		);
+		assert!(!issue.detail.contains("column"), "{}", issue.detail);
+	}
+
+	#[test]
+	fn doctor_reports_alias_collisions_as_duplicate_aliases() {
 		let (_dir, vault) = test_fixtures::vault();
 		vault
 			.write("entities/acme.md", "---\naliases: Client\n---\n# Acme\n")
@@ -1121,19 +1226,40 @@ mod tests {
 		vault.write("linker.md", "[[client]]\n").unwrap();
 		let report = vault
 			.doctor(&DoctorOptions {
-				checks: Some(vec![Check::BrokenLinks, Check::AmbiguousLinks]),
+				checks: Some(vec![Check::BrokenLinks, Check::AmbiguousLinks, Check::DuplicateAliases]),
 				profile: DoctorProfile::Strict,
 				..Default::default()
 			})
 			.unwrap();
 		assert_eq!(report.counts["broken_links"], 0, "issues: {:?}", report.issues);
-		assert_eq!(report.counts["ambiguous_links"], 1);
+		assert_eq!(
+			report.counts["ambiguous_links"], 0,
+			"duplicate alias should own this finding"
+		);
+		assert_eq!(report.counts["duplicate_aliases"], 1);
 		let issue = report
 			.issues
 			.iter()
-			.find(|issue| issue.check == Check::AmbiguousLinks)
+			.find(|issue| issue.check == Check::DuplicateAliases)
 			.unwrap();
+		assert_eq!(issue.severity, Severity::Low);
 		assert!(issue.detail.contains("entities/acme.md, entities/other.md"));
+	}
+
+	#[test]
+	fn duplicate_aliases_fire_without_referencing_link() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("a.md"), "---\naliases: Same\n---\n# A\n").unwrap();
+		std::fs::write(dir.path().join("b.md"), "---\naliases: same\n---\n# B\n").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::DuplicateAliases]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(report.counts["duplicate_aliases"], 1, "issues: {:?}", report.issues);
 	}
 
 	#[test]
@@ -1280,7 +1406,7 @@ mod tests {
 		let vault = Vault::open(dir.path()).unwrap();
 		let report = vault.doctor(&DoctorOptions::default()).unwrap();
 		assert!(report.issues.is_empty());
-		assert_eq!(report.counts.len(), 10);
+		assert_eq!(report.counts.len(), 11);
 		assert_eq!(report.summary, "no issues across 0 pages");
 	}
 

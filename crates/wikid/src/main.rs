@@ -17,7 +17,7 @@ use serde::Serialize;
 use wikid_core::{
 	Check, DoctorOptions, DoctorProfile, Document, EditResult, GlobResult, GrepOptions, GrepResult, HashlinesResult,
 	HealthReport, LineEdit, LinkReport, Listing, MvResult, ReadLimit, ReadRange, RmResult, TagReport, Vault,
-	VaultStatus, WriteResult,
+	VaultStatus, WikidError, WriteResult,
 };
 
 use crate::error::CliError;
@@ -92,7 +92,7 @@ enum Command {
 		#[arg(long, value_name = "N", default_value_t = 3)]
 		depth: usize,
 	},
-	/// Read a page
+	/// Read a page; wikilinks may carry #Heading or #^block-id fragments
 	Cat {
 		path: String,
 		/// Print the whole file instead of the first 400 lines / 32 KiB
@@ -160,9 +160,9 @@ enum Command {
 		#[arg(long)]
 		force: bool,
 	},
-	/// Show outgoing links and backlinks for a page
+	/// Show links/backlinks; #Heading/#^block-id fragments kept; ![[...]] has embed=true
 	Links { path: String },
-	/// List tags across the vault
+	/// List inline and frontmatter tags across the vault
 	Tags,
 	/// Run structural health checks
 	Doctor {
@@ -752,7 +752,7 @@ impl Backend {
 				} else {
 					Some(ReadLimit::default())
 				};
-				Ok(vault.cat_with_range(path, limit, lines)?)
+				with_extension_hint(vault, path, vault.cat_with_range(path, limit, lines))
 			}
 			Self::Remote(remote) => remote.cat(path, full, lines),
 		}
@@ -766,7 +766,7 @@ impl Backend {
 				} else {
 					Some(ReadLimit::default())
 				};
-				Ok(vault.cat_hashes_with_range(path, limit, lines)?)
+				with_extension_hint(vault, path, vault.cat_hashes_with_range(path, limit, lines))
 			}
 			Self::Remote(remote) => remote.cat_hashes(path, full, lines),
 		}
@@ -816,7 +816,7 @@ impl Backend {
 
 	fn links(&self, path: &str) -> Result<LinkReport, CliError> {
 		match self {
-			Self::Local(vault) => Ok(vault.links(path)?),
+			Self::Local(vault) => with_extension_hint(vault, path, vault.links(path)),
 			Self::Remote(remote) => remote.links(path),
 		}
 	}
@@ -847,6 +847,29 @@ impl Backend {
 			Self::Remote(remote) => remote.doctor(stale_days, checks, profile),
 		}
 	}
+}
+
+fn with_extension_hint<T>(vault: &Vault, requested: &str, result: Result<T, WikidError>) -> Result<T, CliError> {
+	match result {
+		Ok(value) => Ok(value),
+		Err(WikidError::NotFound { path }) => Err(not_found_with_extension_hint(vault, requested, path)),
+		Err(err) => Err(err.into()),
+	}
+}
+
+fn not_found_with_extension_hint(vault: &Vault, requested: &str, path: String) -> CliError {
+	let hint =
+		md_extension_hint(vault, requested).unwrap_or_else(|| "run ls or glob to discover valid paths".to_string());
+	CliError::new("not_found", format!("not found: {path}"), Some(hint))
+}
+
+fn md_extension_hint(vault: &Vault, requested: &str) -> Option<String> {
+	if requested.ends_with(".md") {
+		return None;
+	}
+	let candidate = format!("{requested}.md");
+	let full_path = vault.root().join(&candidate);
+	full_path.is_file().then(|| format!("did you mean {candidate}?"))
 }
 
 fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, CliError> {
