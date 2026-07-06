@@ -5,6 +5,7 @@
 //! Every public result type derives `Serialize` and `Deserialize` — they are
 //! the wire format shared by the CLI, HTTP, and MCP surfaces.
 
+pub mod callouts;
 pub mod doctor;
 pub mod error;
 pub mod frontmatter;
@@ -18,6 +19,7 @@ pub mod vault;
 #[cfg(test)]
 pub mod test_fixtures;
 
+pub use callouts::{Callout, extract_callouts};
 pub use doctor::{Check, DoctorOptions, DoctorProfile, HealthReport, Issue, IssueCategory, Severity, SeveritySummary};
 pub use error::WikidError;
 pub use frontmatter::Frontmatter;

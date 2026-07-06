@@ -538,6 +538,21 @@ mod tests {
 	}
 
 	#[test]
+	fn callout_markers_are_not_markdown_links() {
+		let links = extract_links("[!note] in normal text\n> [!warning]- Title\n");
+		assert!(links.is_empty());
+	}
+
+	#[test]
+	fn links_inside_callouts_are_still_extracted() {
+		let links = extract_links("> [!note] Related\n> See [[Link]] for details\n");
+		assert_eq!(links.len(), 1);
+		assert_eq!(links[0].raw, "[[Link]]");
+		assert_eq!(links[0].target, "Link");
+		assert_eq!(links[0].kind, LinkKind::Wikilink);
+	}
+
+	#[test]
 	fn markdown_fragment_is_stripped_for_resolution_and_captured() {
 		let links = extract_links("[s](notes/guide.md#setup)\n");
 		assert_eq!(links[0].target, "notes/guide.md");
@@ -782,6 +797,18 @@ mod tests {
 		vault.write("embedder.md", "![[target]]\n").unwrap();
 		let report = vault.links("target.md").unwrap();
 		assert!(report.backlinks.contains(&"embedder.md".to_string()), "{report:?}");
+	}
+
+	#[test]
+	fn links_inside_callouts_appear_in_the_link_graph() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault.write("Link.md", "# Link\n").unwrap();
+		vault.write("source.md", "> [!note] Related\n> See [[Link]]\n").unwrap();
+		let report = vault.links("source.md").unwrap();
+		assert_eq!(report.outgoing.len(), 1);
+		assert_eq!(report.outgoing[0].resolved.as_deref(), Some("Link.md"));
+		let back = vault.links("Link.md").unwrap();
+		assert_eq!(back.backlinks, vec!["source.md"]);
 	}
 
 	#[test]
