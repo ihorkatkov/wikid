@@ -4,7 +4,9 @@
 [![Release](https://img.shields.io/github/v/release/ihorkatkov/wikid)](https://github.com/ihorkatkov/wikid/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Give every coding agent on every machine one shared, plain-Markdown knowledge base.**
+**wikid: a single Rust binary that exposes plain-Markdown wiki directories to remote agents over CLI and MCP. Give every coding agent on every machine one shared, plain-Markdown knowledge base.**
+
+
 
 Your agents, Claude Code, Codex, anything with a shell, already know `ls`, `cat`, `grep`, and surgical line edits. wikid puts those exact primitives on the wire: point `wikid serve` at a directory of Markdown files (an Obsidian vault works as-is) and every agent everywhere reads and writes the same wiki, live. No clone, no pull, no push, no database, no git required, no lock-in — the wiki stays plain files the whole time.
 
