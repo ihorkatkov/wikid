@@ -265,6 +265,7 @@ pub fn tags(report: &TagReport) -> String {
 	} else {
 		for tag in &report.tags {
 			let occurrence_word = if tag.count == 1 { "occurrence" } else { "occurrences" };
+			let implied = if tag.implied == Some(true) { " (implied)" } else { "" };
 			let preview = tag.pages.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
 			let suffix = if tag.pages.len() > 3 {
 				format!(", … {} more", tag.pages.len() - 3)
@@ -272,8 +273,8 @@ pub fn tags(report: &TagReport) -> String {
 				String::new()
 			};
 			lines.push(format!(
-				"#{}  {} {occurrence_word}  {preview}{suffix}",
-				tag.tag, tag.count
+				"#{}{}  {} {occurrence_word}  {preview}{suffix}",
+				tag.tag, implied, tag.count
 			));
 		}
 	}

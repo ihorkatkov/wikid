@@ -104,6 +104,7 @@ impl From<WikidError> for ApiError {
 		// the core error verbatim — surfaces never invent their own wording.
 		let status = match &err {
 			WikidError::NotFound { .. } => StatusCode::NOT_FOUND,
+			WikidError::FragmentNotFound { .. } => StatusCode::NOT_FOUND,
 			WikidError::InvalidPath { .. } | WikidError::BadPattern { .. } | WikidError::BadEdit { .. } => {
 				StatusCode::BAD_REQUEST
 			}

@@ -11,6 +11,10 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::error::WikidError;
+use crate::links::{LinkIndex, Resolution};
+use crate::markdown::FenceTracker;
+use crate::obsidian_config::ObsidianConfig;
+use crate::paths::Resolved;
 use crate::vault::Vault;
 
 /// Bytes sniffed for a NUL byte to classify a file as binary.
@@ -384,7 +388,11 @@ impl Vault {
 		limit: Option<ReadLimit>,
 		range: Option<ReadRange>,
 	) -> Result<Document, WikidError> {
-		let target = self.resolve(path)?;
+		let (page_path, fragment) = split_cat_fragment(path);
+		let target = match fragment {
+			Some(_) => self.resolve_fragment_page(page_path)?,
+			None => self.resolve(page_path)?,
+		};
 		if !target.abs.exists() {
 			return Err(WikidError::NotFound { path: target.rel });
 		}
@@ -402,17 +410,31 @@ impl Vault {
 		let total_lines = text.lines().count();
 		let total_bytes = meta.len();
 		let modified = rfc3339(meta.modified()?);
-		let (content, truncated, range_start, range_end) = match range {
-			Some(range) => {
-				let (content, start, end) = line_window(&text, total_lines, range)?;
+		let (content, truncated, range_start, range_end) = match fragment {
+			Some(fragment) => {
+				let (range, wanted) = fragment_range(&text, fragment).ok_or_else(|| WikidError::FragmentNotFound {
+					path: target.rel.clone(),
+					fragment: fragment.to_string(),
+				})?;
+				let (content, start, end) =
+					line_window(&text, total_lines, range).map_err(|_| WikidError::FragmentNotFound {
+						path: target.rel.clone(),
+						fragment: wanted,
+					})?;
 				(content, false, Some(start), Some(end))
 			}
-			None => match limit {
-				None => (text, false, None, None),
-				Some(limit) => {
-					let (content, truncated) = truncate(&text, limit);
-					(content, truncated, None, None)
+			None => match range {
+				Some(range) => {
+					let (content, start, end) = line_window(&text, total_lines, range)?;
+					(content, false, Some(start), Some(end))
 				}
+				None => match limit {
+					None => (text, false, None, None),
+					Some(limit) => {
+						let (content, truncated) = truncate(&text, limit);
+						(content, truncated, None, None)
+					}
+				},
 			},
 		};
 		Ok(Document {
@@ -798,6 +820,152 @@ fn kind_of(is_dir: bool, rel: &str) -> EntryKind {
 	}
 }
 
+impl Vault {
+	fn resolve_fragment_page(&self, path: &str) -> Result<Resolved, WikidError> {
+		let files = self.visible_files()?;
+		let mut aliases = Vec::new();
+		for (i, (_rel, abs)) in files.iter().enumerate() {
+			let Some(text) = read_text(abs)? else { continue };
+			let frontmatter = crate::frontmatter::parse(&text);
+			let page_aliases = crate::frontmatter::aliases(&frontmatter);
+			if !page_aliases.is_empty() {
+				aliases.push((i, page_aliases));
+			}
+		}
+		let config = ObsidianConfig::load(self.root());
+		let index = LinkIndex::build(
+			files.iter().map(|(rel, _)| rel.clone()).collect(),
+			&aliases,
+			config.attachment_folder,
+		);
+		match index.resolve(path) {
+			Resolution::Resolved(rel) => self.resolve(&rel),
+			Resolution::Ambiguous(paths) => Err(WikidError::InvalidPath {
+				path: path.to_string(),
+				reason: format!("ambiguous page target; matches: {}", paths.join(", ")),
+			}),
+			Resolution::Broken => self.resolve(path).and_then(|target| {
+				if target.abs.exists() {
+					Ok(target)
+				} else {
+					Err(WikidError::NotFound { path: target.rel })
+				}
+			}),
+		}
+	}
+}
+
+fn split_cat_fragment(path: &str) -> (&str, Option<&str>) {
+	let Some(hash) = find_unescaped_hash(path) else {
+		return (path, None);
+	};
+	(&path[..hash], Some(&path[hash + 1..]))
+}
+
+fn find_unescaped_hash(path: &str) -> Option<usize> {
+	let mut escaped = false;
+	for (i, ch) in path.char_indices() {
+		if escaped {
+			escaped = false;
+			continue;
+		}
+		match ch {
+			'\\' => escaped = true,
+			'#' => return Some(i),
+			_ => {}
+		}
+	}
+	None
+}
+
+fn fragment_range(content: &str, fragment: &str) -> Option<(ReadRange, String)> {
+	let wanted = fragment.rsplit('#').next().unwrap_or(fragment).trim().to_string();
+	if wanted.is_empty() {
+		return None;
+	}
+	if let Some(block_id) = wanted.strip_prefix('^') {
+		return block_fragment_range(content, block_id).map(|range| (range, wanted));
+	}
+	heading_fragment_range(content, &wanted).map(|range| (range, wanted))
+}
+
+fn block_fragment_range(content: &str, block_id: &str) -> Option<ReadRange> {
+	let mut fences = FenceTracker::new();
+	for (line_no, line) in content.lines().enumerate() {
+		if fences.observe(line) || fences.in_fence() {
+			continue;
+		}
+		let trimmed_end = line.trim_end();
+		let Some(caret) = trimmed_end.rfind('^') else {
+			continue;
+		};
+		let candidate = &trimmed_end[caret + 1..];
+		if candidate == block_id
+			&& !candidate.is_empty()
+			&& candidate.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+		{
+			let line = line_no + 1;
+			return Some(ReadRange { start: line, end: line });
+		}
+	}
+	None
+}
+
+fn heading_fragment_range(content: &str, wanted: &str) -> Option<ReadRange> {
+	let headings = atx_headings(content);
+	let (index, heading) = headings
+		.iter()
+		.enumerate()
+		.find(|(_, heading)| heading.text.trim().eq_ignore_ascii_case(wanted))?;
+	let end = headings[index + 1..]
+		.iter()
+		.find(|next| next.level <= heading.level)
+		.map(|next| next.line.saturating_sub(1))
+		.unwrap_or_else(|| content.lines().count());
+	Some(ReadRange {
+		start: heading.line,
+		end,
+	})
+}
+
+#[derive(Debug)]
+struct Heading {
+	line: usize,
+	level: usize,
+	text: String,
+}
+
+fn atx_headings(content: &str) -> Vec<Heading> {
+	let mut headings = Vec::new();
+	let mut fences = FenceTracker::new();
+	for (line_no, line) in content.lines().enumerate() {
+		if fences.observe(line) || fences.in_fence() {
+			continue;
+		}
+		let trimmed_start = line.trim_start();
+		let Some(rest) = trimmed_start.strip_prefix('#') else {
+			continue;
+		};
+		let level = trimmed_start.bytes().take_while(|b| *b == b'#').count();
+		if !(1..=6).contains(&level) {
+			continue;
+		}
+		let rest = &rest[level - 1..];
+		if !rest.starts_with(char::is_whitespace) {
+			continue;
+		}
+		let text = rest.trim().trim_end_matches('#').trim();
+		if !text.is_empty() {
+			headings.push(Heading {
+				line: line_no + 1,
+				level,
+				text: text.to_string(),
+			});
+		}
+	}
+	headings
+}
+
 fn entry_for(rel: &str, meta: &fs::Metadata) -> Result<Entry, WikidError> {
 	let is_dir = meta.is_dir();
 	Ok(Entry {
@@ -1110,6 +1278,61 @@ mod tests {
 		assert!(matches!(
 			vault.cat_with_range("log.md", None, Some(ReadRange { start: 11, end: 12 })),
 			Err(WikidError::BadPattern { .. })
+		));
+	}
+
+	#[test]
+	fn cat_fragment_heading_returns_section_with_absolute_range() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(
+			dir.path().join("Alpha.md"),
+			"# Alpha\n\n## Section One\nintro\n### Nested\ndetail\n## Section Two\nother\n",
+		)
+		.unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+
+		let doc = vault.cat("Alpha#Section One", Some(ReadLimit::default())).unwrap();
+		assert_eq!(doc.path, "Alpha.md");
+		assert_eq!(doc.content, "## Section One\nintro\n### Nested\ndetail\n");
+		assert_eq!(doc.range_start, Some(3));
+		assert_eq!(doc.range_end, Some(6));
+
+		let hashes = vault
+			.cat_hashes("Alpha.md#Alpha#Nested", Some(ReadLimit::default()))
+			.unwrap();
+		assert_eq!(hashes.lines[0].line, 5);
+		assert_eq!(hashes.lines[0].text, "### Nested");
+	}
+
+	#[test]
+	fn cat_fragment_block_anchor_returns_anchor_line() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(
+			dir.path().join("Alpha.md"),
+			"# Alpha\n\nattached block ^abc-123\nnext\n",
+		)
+		.unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+
+		let doc = vault.cat("Alpha.md#^abc-123", None).unwrap();
+		assert_eq!(doc.content, "attached block ^abc-123\n");
+		assert_eq!(doc.range_start, Some(3));
+		assert_eq!(doc.range_end, Some(3));
+	}
+
+	#[test]
+	fn cat_missing_fragment_is_distinct_from_missing_page() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("Alpha.md"), "# Alpha\n").unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+
+		assert!(matches!(
+			vault.cat("Alpha#Missing", None),
+			Err(WikidError::FragmentNotFound { path, fragment }) if path == "Alpha.md" && fragment == "Missing"
+		));
+		assert!(matches!(
+			vault.cat("Missing#Alpha", None),
+			Err(WikidError::NotFound { .. })
 		));
 	}
 

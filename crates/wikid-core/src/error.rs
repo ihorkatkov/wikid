@@ -14,6 +14,15 @@ pub enum WikidError {
 		path: String,
 	},
 
+	/// A page exists, but the requested heading or block fragment does not.
+	#[error("fragment not found in {path}: {fragment}")]
+	FragmentNotFound {
+		/// Vault-relative page path.
+		path: String,
+		/// Fragment text as requested after the trailing `#`.
+		fragment: String,
+	},
+
 	/// The path is absolute, escapes the vault root, contains hidden
 	/// components, or otherwise violates the vault path rules.
 	#[error("invalid path: {path} ({reason})")]
@@ -79,6 +88,7 @@ impl WikidError {
 	pub fn code(&self) -> &'static str {
 		match self {
 			Self::NotFound { .. } => "not_found",
+			Self::FragmentNotFound { .. } => "fragment_not_found",
 			Self::InvalidPath { .. } => "invalid_path",
 			Self::AlreadyExists { .. } => "already_exists",
 			Self::StaleEdit { .. } => "stale_edit",
@@ -93,6 +103,9 @@ impl WikidError {
 	pub fn hint(&self) -> Option<String> {
 		match self {
 			Self::NotFound { .. } => Some("run ls or glob to discover valid paths".to_string()),
+			Self::FragmentNotFound { path, .. } => Some(format!(
+				"run links {path} or cat {path} to inspect available headings and block anchors"
+			)),
 			Self::InvalidPath { .. } => Some(
 				"paths are vault-relative with forward slashes; absolute, '..', and hidden ('.') components are refused"
 					.to_string(),
@@ -115,6 +128,13 @@ mod tests {
 	fn codes_are_stable() {
 		let cases: Vec<(WikidError, &str)> = vec![
 			(WikidError::NotFound { path: "a.md".into() }, "not_found"),
+			(
+				WikidError::FragmentNotFound {
+					path: "a.md".into(),
+					fragment: "Missing".into(),
+				},
+				"fragment_not_found",
+			),
 			(
 				WikidError::InvalidPath {
 					path: "../a".into(),

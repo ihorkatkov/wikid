@@ -25,6 +25,9 @@ pub struct TagSummary {
 	pub count: usize,
 	/// Pages carrying this tag, sorted by vault-relative path.
 	pub pages: Vec<String>,
+	/// True when this tag exists only as an implied ancestor of nested tags.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub implied: Option<bool>,
 }
 
 /// Result of listing all tags in a vault.
@@ -124,6 +127,7 @@ impl Vault {
 	/// Lists tags across all visible Markdown pages in the vault.
 	pub fn tags(&self) -> Result<TagReport, WikidError> {
 		let mut by_key: BTreeMap<String, TagSummary> = BTreeMap::new();
+		let mut literal_keys = HashSet::new();
 		for (rel, abs) in self.visible_files()? {
 			if !is_page(&rel) {
 				continue;
@@ -131,18 +135,25 @@ impl Vault {
 			let Some(text) = read_text(&abs)? else { continue };
 			let frontmatter = crate::frontmatter::parse(&text);
 			for tag in frontmatter_tags(&frontmatter).into_iter().chain(extract_tags(&text)) {
+				literal_keys.insert(tag.to_lowercase());
 				for expanded in tag_ancestors(&tag) {
 					let key = expanded.to_lowercase();
 					let entry = by_key.entry(key).or_insert_with(|| TagSummary {
 						tag: expanded,
 						count: 0,
 						pages: Vec::new(),
+						implied: None,
 					});
 					entry.count += 1;
 					if !entry.pages.contains(&rel) {
 						entry.pages.push(rel.clone());
 					}
 				}
+			}
+		}
+		for (key, summary) in &mut by_key {
+			if !literal_keys.contains(key) {
+				summary.implied = Some(true);
 			}
 		}
 		Ok(TagReport {
@@ -299,6 +310,25 @@ mod tests {
 		assert_eq!(report.tags[0].pages, vec!["a.md", "b.md"]);
 		assert_eq!(report.tags[1].tag, "beta");
 		assert_eq!(report.tags[1].pages, vec!["a.md"]);
+	}
+
+	#[test]
+	fn nested_tags_mark_implied_ancestors_only_when_never_literal() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("A.md"), "#project/wikid #area/research\n").unwrap();
+		std::fs::write(dir.path().join("B.md"), "#project\n").unwrap();
+		let report = Vault::open(dir.path()).unwrap().tags().unwrap();
+
+		let project = report.tags.iter().find(|summary| summary.tag == "project").unwrap();
+		assert_eq!(project.implied, None);
+		let area = report.tags.iter().find(|summary| summary.tag == "area").unwrap();
+		assert_eq!(area.implied, Some(true));
+		let area_research = report
+			.tags
+			.iter()
+			.find(|summary| summary.tag == "area/research")
+			.unwrap();
+		assert_eq!(area_research.implied, None);
 	}
 
 	#[test]

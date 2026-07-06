@@ -72,6 +72,7 @@ export WIKID_WIKI=notes
 wikid status
 wikid grep "auth flow"
 wikid cat architecture.md
+wikid cat architecture.md#Decision        # read one heading section
 wikid cat log.md --lines 1200-1260        # read a large file window
 wikid cat decisions.md --hashes            # each line as line:hash: text
 wikid edit decisions.md --line 4 --hash 3b39a78cfdcb --new "status: final"
@@ -140,11 +141,12 @@ Every command works identically in local and remote mode, and every command take
 |---|---|
 | `status` | Page counts, recent activity, health summary — the no-arg default |
 | `ls` / `tree` / `glob` | Find pages by path |
-| `cat` | Read a page (large files truncated with a size hint; `--full` or `--lines START-END` to override) |
+| `cat` | Read a page or `#Heading` / `#^block-id` fragment (large whole-page reads truncated with a size hint; `--full` or `--lines START-END` to override) |
 | `grep` | Regex search with ranked results and match context |
 | `write` / `edit` / `edit-batch` | Create pages; hash-guarded line edits — a stale hash refuses the whole edit batch, so concurrent writers never silently clobber each other |
 | `mv` / `rm` | Rename and delete (`rm` requires `--force` — never an interactive prompt) |
 | `links` | Outgoing links and backlinks from the wikilink graph |
+| `tags` | Inline/frontmatter tags; nested-tag ancestors are included and marked when only implied |
 | `doctor` | Structural health checks: broken wikilinks, orphans, stale and oversized pages |
 | `update` | Explicitly update the installed local `wikid` binary from verified GitHub release assets |
 

@@ -312,9 +312,31 @@ fn json_output_parses_for_every_command() {
 	let tags = json_of(wikid(vault.path()).args(["tags", "--json"]));
 	assert_eq!(tags["tags"][0]["tag"], "Home");
 	assert_eq!(tags["tags"][1]["tag"], "project");
+	assert!(tags["tags"][1].get("implied").is_none());
 	let doctor = json_of(wikid(vault.path()).args(["doctor", "--json"]));
 	assert!(doctor["issues"].is_array());
 	assert!(doctor["summary"].is_string());
+}
+
+#[test]
+fn tags_json_and_human_output_mark_implied_ancestors() {
+	let vault = fixture_vault();
+	fs::write(
+		vault.path().join("tagged.md"),
+		"#project/wikid #area/research #project\n",
+	)
+	.unwrap();
+
+	let json = json_of(wikid(vault.path()).args(["tags", "--json"]));
+	let tags = json["tags"].as_array().unwrap();
+	let area = tags.iter().find(|tag| tag["tag"] == "area").unwrap();
+	assert_eq!(area["implied"], true);
+	let project = tags.iter().find(|tag| tag["tag"] == "project").unwrap();
+	assert!(project.get("implied").is_none());
+
+	let human = stdout_of(wikid(vault.path()).args(["tags"]));
+	assert!(human.contains("#area (implied)"), "{human}");
+	assert!(human.contains("#project  "), "{human}");
 }
 
 #[test]
@@ -351,6 +373,41 @@ fn json_errors_use_the_error_object_shape() {
 	assert_eq!(value["error"]["code"], "not_found");
 	assert!(value["error"]["message"].is_string());
 	assert!(value["error"]["hint"].is_string());
+}
+
+#[test]
+fn cat_fragments_extract_sections_blocks_and_json_errors() {
+	let vault = fixture_vault();
+	fs::write(
+		vault.path().join("Alpha.md"),
+		"# Alpha\n\n## Section One\nbody\n### Nested\ndetail\n## Section Two\nother ^block-id\n",
+	)
+	.unwrap();
+
+	let section = stdout_of(wikid(vault.path()).args(["cat", "Alpha#Section One"]));
+	assert!(
+		section.contains("## Section One\nbody\n### Nested\ndetail"),
+		"{section}"
+	);
+	assert!(!section.contains("## Section Two"), "{section}");
+
+	let hashes = json_of(wikid(vault.path()).args(["cat", "Alpha.md#Alpha#Nested", "--hashes", "--json"]));
+	assert_eq!(hashes["lines"][0]["line"], 5);
+	assert_eq!(hashes["lines"][0]["text"], "### Nested");
+
+	let block = stdout_of(wikid(vault.path()).args(["cat", "Alpha.md#^block-id"]));
+	assert!(block.contains("other ^block-id"), "{block}");
+	assert!(!block.contains("## Section Two"), "{block}");
+
+	let missing = wikid(vault.path())
+		.args(["cat", "Alpha.md#Missing", "--json"])
+		.output()
+		.unwrap();
+	assert_eq!(missing.status.code(), Some(1));
+	let value: serde_json::Value = serde_json::from_slice(&missing.stdout).expect("valid JSON");
+	assert_eq!(value["error"]["code"], "fragment_not_found");
+	assert!(value["error"]["message"].as_str().unwrap().contains("Alpha.md"));
+	assert!(value["error"]["message"].as_str().unwrap().contains("Missing"));
 }
 
 #[test]

@@ -604,6 +604,22 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn cat_resolves_heading_fragments_over_http() {
+		let dir = vault_dir();
+		std::fs::write(
+			dir.path().join("Alpha.md"),
+			"# Alpha\n\n## Section One\nbody\n## Section Two\nother\n",
+		)
+		.unwrap();
+		let app = test_app(&dir);
+		let (status, body) = call(&app, get_req("/v1/wikis/main/cat?path=Alpha%23Section%20One")).await;
+		assert_eq!(status, StatusCode::OK);
+		let doc: Document = serde_json::from_value(body).unwrap();
+		assert_eq!(doc.path, "Alpha.md");
+		assert_eq!(doc.content, "## Section One\nbody\n");
+	}
+
+	#[tokio::test]
 	async fn cat_with_hashes_returns_hashlines() {
 		let dir = vault_dir();
 		let app = test_app(&dir);

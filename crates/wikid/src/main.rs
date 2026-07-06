@@ -92,7 +92,7 @@ enum Command {
 		#[arg(long, value_name = "N", default_value_t = 3)]
 		depth: usize,
 	},
-	/// Read a page; wikilinks may carry #Heading or #^block-id fragments
+	/// Read a page or wikilink fragment; #Heading returns its section, #^block-id its line
 	Cat {
 		path: String,
 		/// Print the whole file instead of the first 400 lines / 32 KiB
@@ -162,7 +162,7 @@ enum Command {
 	},
 	/// Show links/backlinks; #Heading/#^block-id fragments kept; ![[...]] has embed=true
 	Links { path: String },
-	/// List inline and frontmatter tags, counting occurrences across the vault
+	/// List inline and frontmatter tags; implied nested-tag ancestors are marked
 	Tags,
 	/// Run structural health checks
 	Doctor {
