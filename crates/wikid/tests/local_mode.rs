@@ -1542,6 +1542,78 @@ fn skills_path_materializes_versioned_tree_and_current_symlink() {
 }
 
 #[test]
+#[cfg(unix)]
+fn skills_status_human_output_is_compact_but_json_stays_absolute() {
+	let home = TempDir::new().unwrap();
+	let data = home.path().join("xdg");
+	let claude = home.path().join(".claude/skills");
+	fs::create_dir_all(&claude).unwrap();
+
+	let path = stdout_of(
+		wikid_untargeted()
+			.env("HOME", home.path())
+			.env("XDG_DATA_HOME", &data)
+			.arg("skills")
+			.arg("path")
+			.arg("core"),
+	);
+	let base = PathBuf::from(path.trim())
+		.parent()
+		.unwrap()
+		.parent()
+		.unwrap()
+		.to_path_buf();
+	std::os::unix::fs::symlink(base.join("current/core"), claude.join("wikid-core")).unwrap();
+	std::os::unix::fs::symlink(
+		base.join(format!("{}/llm-wiki", env!("CARGO_PKG_VERSION"))),
+		claude.join("wikid-llm-wiki"),
+	)
+	.unwrap();
+
+	let status = stdout_of(
+		wikid_untargeted()
+			.env("HOME", home.path())
+			.env("XDG_DATA_HOME", &data)
+			.arg("skills")
+			.arg("status"),
+	);
+	assert!(status.contains("materialized: ~/xdg/wikid/skills"));
+	assert!(status.contains("~/.claude/skills/wikid-core -> current/core"));
+	assert!(status.contains(&format!(
+		"~/.claude/skills/wikid-llm-wiki -> {}/llm-wiki",
+		env!("CARGO_PKG_VERSION")
+	)));
+	assert!(!status.contains(home.path().to_str().unwrap()));
+
+	let json = json_of(
+		wikid_untargeted()
+			.env("HOME", home.path())
+			.env("XDG_DATA_HOME", &data)
+			.arg("skills")
+			.arg("status")
+			.arg("--json"),
+	);
+	assert!(
+		json["materialized"]["path"]
+			.as_str()
+			.unwrap()
+			.starts_with(home.path().to_str().unwrap())
+	);
+	assert!(
+		json["wiring"][0]["link"]
+			.as_str()
+			.unwrap()
+			.starts_with(home.path().to_str().unwrap())
+	);
+	assert!(
+		json["wiring"][0]["target"]
+			.as_str()
+			.unwrap()
+			.starts_with(home.path().to_str().unwrap())
+	);
+}
+
+#[test]
 fn unknown_skill_is_structured_not_found() {
 	wikid_untargeted()
 		.arg("skills")

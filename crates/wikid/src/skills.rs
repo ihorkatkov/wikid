@@ -233,39 +233,81 @@ pub fn status() -> Result<SkillStatusResult, CliError> {
 }
 
 pub fn render_status(result: &SkillStatusResult) -> String {
+	render_status_at_width(result, catalog_width(), env_nonempty("HOME").as_deref().map(Path::new))
+}
+
+fn render_status_at_width(result: &SkillStatusResult, width: usize, home: Option<&Path>) -> String {
 	let mut lines = Vec::new();
-	lines.push(format!(
-		"embedded: version {}  guides {}",
-		result.embedded.version, result.embedded.guides
+	lines.extend(wrap_with_prefix_hard(
+		"embedded: ",
+		&format!("version {}  guides {}", result.embedded.version, result.embedded.guides),
+		width,
 	));
-	lines.push(format!("materialized: {}", result.materialized.path));
-	lines.push(format!(
-		"  version_present: {}",
+	let base = Path::new(&result.materialized.path);
+	lines.extend(wrap_with_prefix_hard(
+		"materialized: ",
+		&abbreviate_home(&result.materialized.path, home),
+		width,
+	));
+	lines.extend(wrap_with_prefix_hard(
+		"  version_present: ",
 		if result.materialized.version_present {
 			"yes"
 		} else {
 			"no"
-		}
+		},
+		width,
 	));
-	lines.push(format!(
-		"  current: {}",
-		result.materialized.current.as_deref().unwrap_or("(missing)")
+	let current = result
+		.materialized
+		.current
+		.as_deref()
+		.map(|path| abbreviate_home(path, home))
+		.unwrap_or_else(|| "(missing)".to_owned());
+	lines.extend(wrap_with_prefix_hard("  current: ", &current, width));
+	lines.extend(wrap_with_prefix_hard(
+		"  stale_versions: ",
+		&result.materialized.stale_versions.to_string(),
+		width,
 	));
-	lines.push(format!("  stale_versions: {}", result.materialized.stale_versions));
 	lines.push("wiring:".to_owned());
 	if result.wiring.is_empty() {
 		lines.push("  none".to_owned());
-		lines.push("hint: ln -s \"$(wikid skills path core)\" ~/.claude/skills/wikid-core".to_owned());
+		lines.extend(wrap_with_prefix_hard(
+			"hint: ",
+			"ln -s \"$(wikid skills path core)\" ~/.claude/skills/wikid-core",
+			width,
+		));
 	} else {
-		for wire in &result.wiring {
-			lines.push(format!("  {} -> {}  {}", wire.link, wire.target, wire.state.as_str()));
+		let rows = result
+			.wiring
+			.iter()
+			.map(|wire| {
+				let link = abbreviate_home(&wire.link, home);
+				let target =
+					relativize_target(&wire.target, base).unwrap_or_else(|| abbreviate_home(&wire.target, home));
+				let left = format!("{link} -> {target}");
+				(left, wire.state.as_str())
+			})
+			.collect::<Vec<_>>();
+		let left_width = rows.iter().map(|(left, _)| left.chars().count()).max().unwrap_or(0);
+		for (left, state) in rows {
+			lines.extend(render_wiring_line(&left, state, left_width, width));
 		}
 		if result.wiring.iter().any(|wire| wire.state == WiringState::Pinned) {
-			lines.push("hint: relink pinned skills with `wikid skills path <name>` so updates self-heal".to_owned());
+			lines.extend(wrap_with_prefix_hard(
+				"hint: ",
+				"relink pinned skills with `wikid skills path <name>` so updates self-heal",
+				width,
+			));
 		}
 	}
 	if !result.materialized.version_present {
-		lines.push("hint: wikid skills path — materialize the current version".to_owned());
+		lines.extend(wrap_with_prefix_hard(
+			"hint: ",
+			"wikid skills path — materialize the current version",
+			width,
+		));
 	}
 	lines.join("\n")
 }
@@ -540,6 +582,103 @@ fn wrap_with_prefix(prefix: &str, text: &str, width: usize) -> Vec<String> {
 	lines
 }
 
+fn abbreviate_home(path: &str, home: Option<&Path>) -> String {
+	let Some(home) = home else {
+		return path.to_owned();
+	};
+	let path_ref = Path::new(path);
+	if path_ref == home {
+		return "~".to_owned();
+	}
+	path_ref
+		.strip_prefix(home)
+		.ok()
+		.map(|rest| format!("~/{}", rest.to_string_lossy()))
+		.unwrap_or_else(|| path.to_owned())
+}
+
+fn relativize_target(target: &str, base: &Path) -> Option<String> {
+	Path::new(target)
+		.strip_prefix(base)
+		.ok()
+		.map(|path| path.to_string_lossy().to_string())
+		.filter(|path| !path.is_empty())
+}
+
+fn render_wiring_line(left: &str, state: &str, left_width: usize, width: usize) -> Vec<String> {
+	let padded_left = pad_to_chars(left, left_width);
+	let line = format!("  {padded_left}  {state}");
+	if line.chars().count() <= width {
+		return vec![line];
+	}
+	let mut lines = wrap_hard_with_indent("  ", left, width);
+	let last = lines.pop().unwrap_or_else(|| "  ".to_owned());
+	let state_line = format!("{last}  {state}");
+	if state_line.chars().count() <= width {
+		lines.push(state_line);
+	} else {
+		lines.push(last);
+		lines.extend(wrap_hard_with_indent("  ", state, width));
+	}
+	lines
+}
+
+fn pad_to_chars(text: &str, width: usize) -> String {
+	let len = text.chars().count();
+	if len >= width {
+		text.to_owned()
+	} else {
+		format!("{}{}", text, " ".repeat(width - len))
+	}
+}
+
+fn wrap_with_prefix_hard(prefix: &str, text: &str, width: usize) -> Vec<String> {
+	let mut lines = Vec::new();
+	let indent = " ".repeat(prefix.chars().count());
+	let mut line = prefix.to_owned();
+	for word in text.split_whitespace() {
+		let sep = if line == prefix { "" } else { " " };
+		if line.chars().count() + sep.chars().count() + word.chars().count() <= width {
+			line.push_str(sep);
+			line.push_str(word);
+			continue;
+		}
+		if line != prefix {
+			lines.push(line);
+			line = indent.clone();
+		}
+		if line.chars().count() + word.chars().count() <= width {
+			line.push_str(word);
+		} else {
+			let mut chunks = wrap_hard_with_indent(&line, word, width);
+			line = chunks.pop().unwrap_or_else(|| indent.clone());
+			lines.extend(chunks);
+		}
+	}
+	lines.push(line);
+	lines
+}
+
+fn wrap_hard_with_indent(indent: &str, text: &str, width: usize) -> Vec<String> {
+	let indent_len = indent.chars().count();
+	let available = width.saturating_sub(indent_len).max(1);
+	let mut lines = Vec::new();
+	let mut current = indent.to_owned();
+	for ch in text.chars() {
+		if current.chars().count() >= width {
+			lines.push(current);
+			current = indent.to_owned();
+		}
+		if current.chars().count() - indent_len >= available {
+			lines.push(current);
+			current = indent.to_owned();
+		}
+		current.push(ch);
+	}
+	lines.push(current);
+	lines
+}
+
 fn io_error(err: std::io::Error) -> CliError {
 	CliError::new("io", err.to_string(), None)
 }
@@ -593,6 +732,91 @@ mod tests {
 		let result = list().unwrap();
 		for width in [40, 72, 120] {
 			let rendered = render_list_at_width(&result, width);
+			for line in rendered.lines() {
+				let len = line.chars().count();
+				assert!(
+					len <= width,
+					"line is {len} chars at width {width}: {line:?}\n{rendered}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn rendered_status_abbreviates_relativizes_and_aligns_state_column() {
+		let home = Path::new("/tmp/fake-home");
+		let result = SkillStatusResult {
+			embedded: EmbeddedStatus {
+				version: "0.1.0".to_owned(),
+				guides: 2,
+			},
+			materialized: MaterializedStatus {
+				path: "/tmp/fake-home/.local/share/wikid/skills".to_owned(),
+				current: Some("/tmp/fake-home/.local/share/wikid/skills/0.1.0".to_owned()),
+				version_present: true,
+				stale_versions: 1,
+			},
+			wiring: vec![
+				WiringStatus {
+					link: "/tmp/fake-home/.claude/skills/wikid-core".to_owned(),
+					target: "/tmp/fake-home/.local/share/wikid/skills/current/core".to_owned(),
+					state: WiringState::Ok,
+				},
+				WiringStatus {
+					link: "/tmp/fake-home/.claude/skills/wikid-llm-wiki".to_owned(),
+					target: "/tmp/fake-home/.local/share/wikid/skills/0.1.0/llm-wiki".to_owned(),
+					state: WiringState::Pinned,
+				},
+				WiringStatus {
+					link: "/tmp/fake-home/.claude/skills/wikid-old".to_owned(),
+					target: "/tmp/fake-home/.local/share/wikid/skills/0.0.9/core".to_owned(),
+					state: WiringState::Broken,
+				},
+			],
+		};
+
+		let rendered = render_status_at_width(&result, 120, Some(home));
+		assert!(rendered.contains("materialized: ~/.local/share/wikid/skills"));
+		assert!(rendered.contains("  current: ~/.local/share/wikid/skills/0.1.0"));
+		assert!(rendered.contains("~/.claude/skills/wikid-core -> current/core"));
+		assert!(rendered.contains("~/.claude/skills/wikid-llm-wiki -> 0.1.0/llm-wiki"));
+		assert!(rendered.contains("~/.claude/skills/wikid-old -> 0.0.9/core"));
+		assert!(!rendered.contains("/tmp/fake-home"));
+
+		let state_columns = ["ok", "pinned", "broken"]
+			.into_iter()
+			.map(|state| {
+				let line = rendered.lines().find(|line| line.ends_with(state)).unwrap();
+				line.chars().count() - state.chars().count()
+			})
+			.collect::<Vec<_>>();
+		assert_eq!(state_columns[0], state_columns[1]);
+		assert_eq!(state_columns[1], state_columns[2]);
+	}
+
+	#[test]
+	fn rendered_status_respects_width_for_every_line() {
+		let home = Path::new("/tmp/fake-home");
+		let result = SkillStatusResult {
+			embedded: EmbeddedStatus {
+				version: "0.1.0".to_owned(),
+				guides: 2,
+			},
+			materialized: MaterializedStatus {
+				path: "/tmp/fake-home/.local/share/wikid/skills".to_owned(),
+				current: Some("/tmp/fake-home/.local/share/wikid/skills/current".to_owned()),
+				version_present: false,
+				stale_versions: 0,
+			},
+			wiring: vec![WiringStatus {
+				link: "/tmp/fake-home/.claude/skills/wikid-very-deep-nested-long-name".to_owned(),
+				target: "/tmp/fake-home/.local/share/wikid/skills/current/very-deep-nested-long-name".to_owned(),
+				state: WiringState::Ok,
+			}],
+		};
+
+		for width in [40, 72, 120] {
+			let rendered = render_status_at_width(&result, width, Some(home));
 			for line in rendered.lines() {
 				let len = line.chars().count();
 				assert!(
