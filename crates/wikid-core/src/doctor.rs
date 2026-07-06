@@ -269,9 +269,9 @@ impl Vault {
 	/// visible file participates in `duplicate_stems`.
 	pub fn doctor(&self, opts: &DoctorOptions) -> Result<HealthReport, WikidError> {
 		let files = self.visible_files()?;
-		let index = LinkIndex::build(files.iter().map(|(rel, _)| rel.clone()).collect());
-		let mut pages = Vec::new();
-		for (rel, abs) in &files {
+		let mut page_inputs = Vec::new();
+		let mut aliases = Vec::new();
+		for (i, (rel, abs)) in files.iter().enumerate() {
 			if !is_page(rel) {
 				continue;
 			}
@@ -279,22 +279,39 @@ impl Vault {
 			// every check and the page count); binary/non-UTF-8 pages are
 			// deliberately skipped.
 			let Some(text) = read_text(abs)? else { continue };
+			let frontmatter = frontmatter::parse(&text);
+			let page_aliases = frontmatter::aliases(&frontmatter);
+			if !page_aliases.is_empty() {
+				aliases.push((i, page_aliases));
+			}
 			let meta = std::fs::metadata(abs)?;
-			pages.push(PageScan {
-				rel: rel.clone(),
-				frontmatter: frontmatter::parse(&text),
-				links: extract_links(&text)
+			page_inputs.push((
+				rel.clone(),
+				frontmatter,
+				extract_links(&text),
+				meta.len(),
+				text.lines().count(),
+				meta.modified()?,
+			));
+		}
+		let index = LinkIndex::build(files.iter().map(|(rel, _)| rel.clone()).collect(), &aliases);
+		let pages: Vec<PageScan> = page_inputs
+			.into_iter()
+			.map(|(rel, frontmatter, extracted, bytes, lines, modified)| PageScan {
+				rel,
+				frontmatter,
+				links: extracted
 					.into_iter()
 					.map(|link| {
 						let resolution = index.resolve(&link.target);
 						(link, resolution)
 					})
 					.collect(),
-				bytes: meta.len(),
-				lines: text.lines().count(),
-				modified: meta.modified()?,
-			});
-		}
+				bytes,
+				lines,
+				modified,
+			})
+			.collect();
 		let enabled: Vec<Check> = match &opts.checks {
 			Some(filter) => Check::ALL.iter().copied().filter(|c| filter.contains(c)).collect(),
 			None => Check::ALL.to_vec(),
@@ -920,6 +937,51 @@ mod tests {
 		let report = vault.doctor(&DoctorOptions::default()).unwrap();
 		assert_eq!(report.counts["broken_links"], 1);
 		assert!(report.issues.iter().all(|i| !i.path.contains("logo.png")));
+	}
+
+	#[test]
+	fn doctor_resolves_frontmatter_aliases_without_a_broken_link() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault
+			.write("entities/acme.md", "---\naliases: [ACME Corp, Acme]\n---\n# Acme\n")
+			.unwrap();
+		vault.write("linker.md", "[[Acme]] [[ACME Corp]]\n").unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenLinks, Check::AmbiguousLinks]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(report.counts["broken_links"], 0, "issues: {:?}", report.issues);
+		assert_eq!(report.counts["ambiguous_links"], 0, "issues: {:?}", report.issues);
+	}
+
+	#[test]
+	fn doctor_reports_alias_collisions_as_ambiguous_links() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault
+			.write("entities/acme.md", "---\naliases: Client\n---\n# Acme\n")
+			.unwrap();
+		vault
+			.write("entities/other.md", "---\naliases: CLIENT\n---\n# Other\n")
+			.unwrap();
+		vault.write("linker.md", "[[client]]\n").unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenLinks, Check::AmbiguousLinks]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(report.counts["broken_links"], 0, "issues: {:?}", report.issues);
+		assert_eq!(report.counts["ambiguous_links"], 1);
+		let issue = report
+			.issues
+			.iter()
+			.find(|issue| issue.check == Check::AmbiguousLinks)
+			.unwrap();
+		assert!(issue.detail.contains("entities/acme.md, entities/other.md"));
 	}
 
 	#[cfg(unix)]

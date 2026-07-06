@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::WikidError;
+use crate::frontmatter;
 use crate::ops::{is_page, read_text};
 use crate::paths;
 use crate::vault::Vault;
@@ -233,11 +234,14 @@ pub(crate) struct LinkIndex {
 	files: Vec<String>,
 	/// Lowercased stem and full file name → indices into `files`.
 	by_name: BTreeMap<String, Vec<usize>>,
+	/// Lowercased frontmatter alias → indices into `files`.
+	by_alias: BTreeMap<String, Vec<usize>>,
 }
 
 impl LinkIndex {
-	/// Builds the index from the vault-relative paths of all visible files.
-	pub(crate) fn build(files: Vec<String>) -> Self {
+	/// Builds the index from the vault-relative paths of all visible files and
+	/// per-file frontmatter aliases.
+	pub(crate) fn build(files: Vec<String>, aliases: &[(usize, Vec<String>)]) -> Self {
 		let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
 		for (i, rel) in files.iter().enumerate() {
 			let name = rel.rsplit('/').next().unwrap_or(rel).to_lowercase();
@@ -247,14 +251,25 @@ impl LinkIndex {
 				by_name.entry(stem).or_default().push(i);
 			}
 		}
-		Self { files, by_name }
+		let mut by_alias: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+		for (i, page_aliases) in aliases {
+			for alias in page_aliases {
+				by_alias.entry(alias.to_lowercase()).or_default().push(*i);
+			}
+		}
+		Self {
+			files,
+			by_name,
+			by_alias,
+		}
 	}
 
 	/// Resolution order (DESIGN §4): (1) exact relative path from the root,
 	/// with or without `.md`; (2) for bare targets, a unique case-insensitive
 	/// stem or file-name match anywhere in the vault; (3) a unique
-	/// case-insensitive path-suffix match (`folder/Note`). Multiple candidates
-	/// at a stage yield `Ambiguous`; no candidates yield `Broken`.
+	/// case-insensitive path-suffix match (`folder/Note`); (4) for bare targets,
+	/// a unique case-insensitive frontmatter alias. Multiple candidates at a
+	/// stage yield `Ambiguous`; no candidates yield `Broken`.
 	pub(crate) fn resolve(&self, target: &str) -> Resolution {
 		let Ok(components) = paths::normalize(target) else {
 			return Resolution::Broken;
@@ -268,15 +283,18 @@ impl LinkIndex {
 			return Resolution::Resolved(with_md);
 		}
 		if !rel.contains('/') {
-			let candidates = match self.by_name.get(&rel.to_lowercase()) {
+			let candidates: Vec<String> = match self.by_name.get(&rel.to_lowercase()) {
 				Some(indices) => indices.iter().map(|&i| self.files[i].clone()).collect(),
 				None => Vec::new(),
 			};
-			return decide(candidates);
+			if !candidates.is_empty() {
+				return decide(candidates);
+			}
+			return decide(self.alias_candidates(&rel));
 		}
 		let rel_lower = rel.to_lowercase();
 		let suffixes = [rel_lower.clone(), format!("{rel_lower}.md")];
-		let candidates = self
+		let candidates: Vec<String> = self
 			.files
 			.iter()
 			.filter(|f| {
@@ -285,7 +303,17 @@ impl LinkIndex {
 			})
 			.cloned()
 			.collect();
-		decide(candidates)
+		if !candidates.is_empty() {
+			return decide(candidates);
+		}
+		decide(self.alias_candidates(&rel))
+	}
+
+	fn alias_candidates(&self, rel: &str) -> Vec<String> {
+		self.by_alias
+			.get(&rel.to_lowercase())
+			.map(|indices| indices.iter().map(|&i| self.files[i].clone()).collect())
+			.unwrap_or_default()
 	}
 }
 
@@ -317,10 +345,9 @@ impl Vault {
 			});
 		}
 		let files = self.visible_files()?;
-		let index = LinkIndex::build(files.iter().map(|(rel, _)| rel.clone()).collect());
-		let mut outgoing = Vec::new();
-		let mut backlinks = Vec::new();
-		for (rel, abs) in &files {
+		let mut page_links = Vec::new();
+		let mut aliases = Vec::new();
+		for (i, (rel, abs)) in files.iter().enumerate() {
 			if !is_page(rel) {
 				continue;
 			}
@@ -328,8 +355,18 @@ impl Vault {
 			// silently wrong outgoing links or backlinks); binary/non-UTF-8
 			// pages are deliberately skipped.
 			let Some(text) = read_text(abs)? else { continue };
-			let extracted = extract_links(&text);
-			if *rel == target.rel {
+			let fm = frontmatter::parse(&text);
+			let page_aliases = frontmatter::aliases(&fm);
+			if !page_aliases.is_empty() {
+				aliases.push((i, page_aliases));
+			}
+			page_links.push((rel.clone(), extract_links(&text)));
+		}
+		let index = LinkIndex::build(files.iter().map(|(rel, _)| rel.clone()).collect(), &aliases);
+		let mut outgoing = Vec::new();
+		let mut backlinks = Vec::new();
+		for (rel, extracted) in page_links {
+			if rel == target.rel {
 				outgoing = extracted
 					.into_iter()
 					.map(|link| {
@@ -351,7 +388,7 @@ impl Vault {
 				.iter()
 				.any(|l| matches!(index.resolve(&l.target), Resolution::Resolved(p) if p == target.rel))
 			{
-				backlinks.push(rel.clone());
+				backlinks.push(rel);
 			}
 		}
 		backlinks.sort();
@@ -503,7 +540,15 @@ mod tests {
 	// --- resolution order ---
 
 	fn index(files: &[&str]) -> LinkIndex {
-		LinkIndex::build(files.iter().map(|f| f.to_string()).collect())
+		index_with_aliases(files, &[])
+	}
+
+	fn index_with_aliases(files: &[&str], aliases: &[(usize, Vec<&str>)]) -> LinkIndex {
+		let aliases: Vec<(usize, Vec<String>)> = aliases
+			.iter()
+			.map(|(i, values)| (*i, values.iter().map(|value| value.to_string()).collect()))
+			.collect();
+		LinkIndex::build(files.iter().map(|f| f.to_string()).collect(), &aliases)
 	}
 
 	#[test]
@@ -577,6 +622,42 @@ mod tests {
 		assert_eq!(idx.resolve(""), Resolution::Broken);
 	}
 
+	#[test]
+	fn aliases_resolve_after_file_matches() {
+		let idx = index_with_aliases(&["entities/acme.md", "client.md"], &[(0, vec!["Client", "ACME Corp"])]);
+		assert_eq!(
+			idx.resolve("ACME Corp"),
+			Resolution::Resolved("entities/acme.md".into())
+		);
+		// A real file/stem wins over an alias of the same name.
+		assert_eq!(idx.resolve("Client"), Resolution::Resolved("client.md".into()));
+	}
+
+	#[test]
+	fn alias_matching_is_case_insensitive_and_collisions_are_ambiguous() {
+		let idx = index_with_aliases(
+			&["entities/acme.md", "entities/other.md"],
+			&[(0, vec!["Client"]), (1, vec!["CLIENT"])],
+		);
+		assert_eq!(
+			idx.resolve("client"),
+			Resolution::Ambiguous(vec!["entities/acme.md".into(), "entities/other.md".into()])
+		);
+	}
+
+	#[test]
+	fn existing_resolution_behaviour_is_unchanged_with_aliases() {
+		let idx = index_with_aliases(
+			&["projects/Alpha.md", "deep/folder/Note.md"],
+			&[(0, vec!["Something Else"])],
+		);
+		assert_eq!(idx.resolve("alpha"), Resolution::Resolved("projects/Alpha.md".into()));
+		assert_eq!(
+			idx.resolve("folder/Note"),
+			Resolution::Resolved("deep/folder/Note.md".into())
+		);
+	}
+
 	// --- Vault::links ---
 
 	#[test]
@@ -613,6 +694,29 @@ mod tests {
 		// index.md links [[Alpha]] (stem), guide.md links [[Alpha#Status|…]].
 		let report = vault.links("projects/alpha.md").unwrap();
 		assert_eq!(report.backlinks, vec!["index.md", "notes/guide.md"]);
+	}
+
+	#[test]
+	fn links_resolve_frontmatter_aliases() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault
+			.write("entities/acme.md", "---\naliases: [ACME Corp, Acme]\n---\n# Acme\n")
+			.unwrap();
+		vault.write("linker.md", "[[Acme]] and [[ACME Corp]]\n").unwrap();
+		let report = vault.links("linker.md").unwrap();
+		let resolved: Vec<Option<&str>> = report.outgoing.iter().map(|link| link.resolved.as_deref()).collect();
+		assert_eq!(resolved, vec![Some("entities/acme.md"), Some("entities/acme.md")]);
+	}
+
+	#[test]
+	fn single_string_alias_is_honored() {
+		let (_dir, vault) = test_fixtures::vault();
+		vault
+			.write("entities/acme.md", "---\naliases: ACME Corp\n---\n# Acme\n")
+			.unwrap();
+		vault.write("linker.md", "[[ACME Corp]]\n").unwrap();
+		let report = vault.links("linker.md").unwrap();
+		assert_eq!(report.outgoing[0].resolved.as_deref(), Some("entities/acme.md"));
 	}
 
 	#[test]

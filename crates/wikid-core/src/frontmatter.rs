@@ -38,6 +38,30 @@ pub fn parse(content: &str) -> Frontmatter {
 	split(content).0
 }
 
+/// Frontmatter aliases (Obsidian `aliases` key): either a single string or
+/// a sequence of strings. Other shapes and empty strings are ignored.
+pub fn aliases(frontmatter: &Frontmatter) -> Vec<String> {
+	let Frontmatter::Present(map) = frontmatter else {
+		return Vec::new();
+	};
+	match map.get("aliases") {
+		Some(serde_yaml::Value::String(alias)) => trimmed_alias(alias).into_iter().collect(),
+		Some(serde_yaml::Value::Sequence(values)) => values
+			.iter()
+			.filter_map(|value| match value {
+				serde_yaml::Value::String(alias) => trimmed_alias(alias),
+				_ => None,
+			})
+			.collect(),
+		_ => Vec::new(),
+	}
+}
+
+fn trimmed_alias(alias: &str) -> Option<String> {
+	let alias = alias.trim();
+	(!alias.is_empty()).then(|| alias.to_string())
+}
+
 /// The display title of a page (DESIGN §4): frontmatter `title` (string,
 /// non-empty) → first `# ` heading in the body → the file stem.
 pub fn page_title(content: &str, stem: &str) -> String {
@@ -156,6 +180,25 @@ mod tests {
 	#[test]
 	fn closing_delimiter_may_be_the_last_line_without_newline() {
 		assert_eq!(parse("---\n---"), Frontmatter::Present(BTreeMap::new()));
+	}
+
+	// --- aliases ---
+
+	#[test]
+	fn aliases_reads_sequence_and_single_string() {
+		let fm = parse("---\naliases: [ACME Corp, Acme]\n---\n");
+		assert_eq!(aliases(&fm), vec!["ACME Corp", "Acme"]);
+		let fm = parse("---\naliases: ACME Corp\n---\n");
+		assert_eq!(aliases(&fm), vec!["ACME Corp"]);
+	}
+
+	#[test]
+	fn aliases_ignore_empty_and_non_string_shapes() {
+		let fm = parse("---\naliases: ['', '  ', ok, 42]\n---\n");
+		assert_eq!(aliases(&fm), vec!["ok"]);
+		let fm = parse("---\naliases: {name: Acme}\n---\n");
+		assert!(aliases(&fm).is_empty());
+		assert!(aliases(&Frontmatter::Absent).is_empty());
 	}
 
 	// --- title precedence ---

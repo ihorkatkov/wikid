@@ -41,7 +41,7 @@ Public API (`Vault` methods; all return `Result<T, WikidError>`):
 ## 4. Core: link model (Obsidian-compatible)
 
 - Extract `[[Target]]`, `[[Target|alias]]`, `[[Target#Heading]]` (heading part ignored for resolution) and markdown links `[text](relative/path.md)` (skip `http(s)://`, `mailto:`, anchors).
-- Resolution, in order: (1) exact relative path from root (with/without `.md`); (2) unique file-stem match anywhere in the vault (case-insensitive); (3) unique path-suffix match (`folder/Note`). Multiple stem candidates → unresolved + flagged `ambiguous` (doctor reports it). No match → broken link.
+- Resolution, in order: (1) exact relative path from root (with/without `.md`); (2) unique file-stem match anywhere in the vault (case-insensitive); (3) unique path-suffix match (`folder/Note`); (4) unique frontmatter alias match from `aliases` (string or list, case-insensitive). Real file/path/stem matches win before aliases. Multiple candidates at a stage → unresolved + flagged `ambiguous` (doctor reports it). No match → broken link.
 - Frontmatter: leading `---\n…\n---` block parsed with `serde_yaml` into a string-keyed map. Absence is normal. Malformed YAML → treated as no frontmatter; doctor flags it and includes the `serde_yaml` parser/type error string in the issue detail.
 - Page title: frontmatter `title` → first `# heading` → file stem.
 
