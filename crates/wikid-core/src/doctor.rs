@@ -1379,6 +1379,36 @@ mod tests {
 	}
 
 	#[test]
+	fn doctor_validates_markdown_fragment_only_links_against_containing_page() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(
+			dir.path().join("source.md"),
+			"# Heading One\n\n[x](#Heading%20One) [bad](#Missing) [block](#^b1) [bad-block](#^missing)\nanchor ^b1\n",
+		)
+		.unwrap();
+		let vault = Vault::open(dir.path()).unwrap();
+		let report = vault
+			.doctor(&DoctorOptions {
+				checks: Some(vec![Check::BrokenHeadingReference, Check::BrokenBlockReference]),
+				profile: DoctorProfile::Strict,
+				..Default::default()
+			})
+			.unwrap();
+		assert_eq!(
+			report.counts["broken_heading_reference"], 1,
+			"issues: {:?}",
+			report.issues
+		);
+		assert_eq!(
+			report.counts["broken_block_reference"], 1,
+			"issues: {:?}",
+			report.issues
+		);
+		assert!(report.issues.iter().any(|issue| issue.detail.contains("Missing")));
+		assert!(report.issues.iter().any(|issue| issue.detail.contains("^missing")));
+	}
+
+	#[test]
 	fn doctor_accepts_heading_and_block_after_mismatched_fence_inside_code_block() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::write(

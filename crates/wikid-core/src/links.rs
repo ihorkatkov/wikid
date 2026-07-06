@@ -95,9 +95,9 @@ fn markdown_re() -> &'static regex::Regex {
 }
 
 /// Extracts every wikilink and markdown link from `content`, in document
-/// order. External markdown targets (`http://`, `https://`, `mailto:`) and
-/// pure markdown anchors (`#heading`) are skipped. Fragment-only wikilinks are
-/// kept as self-links whose target is empty and whose fragment is populated.
+/// order. External markdown targets (`http://`, `https://`, `mailto:`) are
+/// skipped. Fragment-only wikilinks and markdown anchors are kept as
+/// self-links whose target is empty and whose fragment is populated.
 pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 	let mut found: Vec<(usize, ExtractedLink)> = Vec::new();
 	let mut fences = FenceTracker::new();
@@ -157,19 +157,20 @@ fn extract_line_links(line: &str, offset: usize, found: &mut Vec<(usize, Extract
 		}
 		let (target, fragment) = split_fragment(inner);
 		let target = target.trim();
-		if target.is_empty() {
+		if target.is_empty() && fragment.is_none() {
 			continue;
 		}
 		found.push((
 			offset + whole.start(),
 			ExtractedLink {
 				raw: whole.as_str().to_string(),
-				// Markdown destinations are URLs: `My%20Note.md` on disk is
-				// `My Note.md`. Wikilink targets stay literal.
+				// Markdown destinations and fragments are URLs: `My%20Note.md`
+				// on disk is `My Note.md`, and `#Heading%20One` points at
+				// `Heading One`. Wikilink targets/fragments stay literal.
 				target: percent_decode(target),
 				kind: LinkKind::Markdown,
 				embed: whole.as_str().starts_with('!'),
-				fragment,
+				fragment: fragment.map(|fragment| percent_decode(&fragment)),
 			},
 		));
 	}
@@ -366,7 +367,7 @@ impl LinkIndex {
 	}
 
 	pub(crate) fn resolve_from(&self, source: &str, link: &ExtractedLink) -> Resolution {
-		if link.kind == LinkKind::Wikilink && link.target.is_empty() {
+		if link.target.is_empty() && link.fragment.is_some() {
 			return Resolution::Resolved(source.to_string());
 		}
 		if link.kind != LinkKind::Markdown {
@@ -529,23 +530,24 @@ mod tests {
 	}
 
 	#[test]
-	fn extracts_markdown_links_and_skips_external_and_markdown_anchors() {
+	fn extracts_markdown_links_and_skips_external_links() {
 		let links = extract_links(
 			"[guide](notes/guide.md) ![img](img/logo.png) [w](https://e.com) \
 			 [h](http://e.com) [m](mailto:a@b.c) [root](/docs/page) [a](#top) [[#heading]] [b](<my file.md>)\n",
 		);
-		let targets: Vec<(&str, &str, LinkKind)> = links
+		let targets: Vec<(&str, &str, Option<&str>, LinkKind)> = links
 			.iter()
-			.map(|l| (l.raw.as_str(), l.target.as_str(), l.kind))
+			.map(|l| (l.raw.as_str(), l.target.as_str(), l.fragment.as_deref(), l.kind))
 			.collect();
 		assert_eq!(
 			targets,
 			vec![
-				("[guide](notes/guide.md)", "notes/guide.md", LinkKind::Markdown),
-				("![img](img/logo.png)", "img/logo.png", LinkKind::Markdown),
-				("[root](/docs/page)", "/docs/page", LinkKind::Markdown),
-				("[[#heading]]", "", LinkKind::Wikilink),
-				("[b](<my file.md>)", "my file.md", LinkKind::Markdown),
+				("[guide](notes/guide.md)", "notes/guide.md", None, LinkKind::Markdown),
+				("![img](img/logo.png)", "img/logo.png", None, LinkKind::Markdown),
+				("[root](/docs/page)", "/docs/page", None, LinkKind::Markdown),
+				("[a](#top)", "", Some("top"), LinkKind::Markdown),
+				("[[#heading]]", "", Some("heading"), LinkKind::Wikilink),
+				("[b](<my file.md>)", "my file.md", None, LinkKind::Markdown),
 			]
 		);
 	}
@@ -559,7 +561,8 @@ mod tests {
 
 	#[test]
 	fn skips_links_inside_backtick_code_fences() {
-		let links = extract_links("before [[Before]]\n```\n[[X]] ![[X]] [md](x.md)\n```\nafter [[After]]\n");
+		let links =
+			extract_links("before [[Before]]\n```\n[[X]] ![[X]] [md](x.md) [anchor](#Heading)\n```\nafter [[After]]\n");
 		let raws: Vec<&str> = links.iter().map(|l| l.raw.as_str()).collect();
 		assert_eq!(raws, vec!["[[Before]]", "[[After]]"]);
 	}
@@ -679,9 +682,11 @@ mod tests {
 
 	#[test]
 	fn markdown_fragment_is_stripped_for_resolution_and_captured() {
-		let links = extract_links("[s](notes/guide.md#setup)\n");
+		let links = extract_links("[s](notes/guide.md#setup) [a](#Heading%20One)\n");
 		assert_eq!(links[0].target, "notes/guide.md");
 		assert_eq!(links[0].fragment.as_deref(), Some("setup"));
+		assert_eq!(links[1].target, "");
+		assert_eq!(links[1].fragment.as_deref(), Some("Heading One"));
 	}
 
 	#[test]
@@ -1104,20 +1109,32 @@ mod tests {
 	}
 
 	#[test]
-	fn fragment_only_wikilinks_resolve_to_the_containing_page() {
+	fn fragment_only_links_resolve_to_the_containing_page() {
 		let (_dir, vault) = test_fixtures::vault();
 		vault
 			.write(
 				"Sub/Child.md",
-				"# Child Section\n\nSee [[#Child Section]] and ![[#^block]]\nanchor ^block\n",
+				"# Child Section\n\nSee [[#Child Section]], [jump](#Child Section), [encoded](#Child%20Section), and ![[#^block]]\nanchor ^block\n",
 			)
 			.unwrap();
 		let report = vault.links("Sub/Child.md").unwrap();
 		let resolved: Vec<Option<&str>> = report.outgoing.iter().map(|link| link.resolved.as_deref()).collect();
-		assert_eq!(resolved, vec![Some("Sub/Child.md"), Some("Sub/Child.md")]);
+		assert_eq!(
+			resolved,
+			vec![
+				Some("Sub/Child.md"),
+				Some("Sub/Child.md"),
+				Some("Sub/Child.md"),
+				Some("Sub/Child.md"),
+			]
+		);
 		assert_eq!(report.outgoing[0].target, "");
 		assert_eq!(report.outgoing[0].fragment.as_deref(), Some("Child Section"));
-		assert!(report.outgoing[1].embed);
+		assert_eq!(report.outgoing[1].kind, LinkKind::Markdown);
+		assert_eq!(report.outgoing[1].target, "");
+		assert_eq!(report.outgoing[1].fragment.as_deref(), Some("Child Section"));
+		assert_eq!(report.outgoing[2].fragment.as_deref(), Some("Child Section"));
+		assert!(report.outgoing[3].embed);
 	}
 
 	#[test]
