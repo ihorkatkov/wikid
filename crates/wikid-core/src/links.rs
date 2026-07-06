@@ -12,6 +12,7 @@ use crate::frontmatter;
 use crate::obsidian_config::ObsidianConfig;
 use crate::ops::{is_page, read_text};
 use crate::paths;
+use crate::tags::{fence_marker, inline_code_spans};
 use crate::vault::Vault;
 
 /// How a link was written in the source page.
@@ -97,8 +98,37 @@ fn markdown_re() -> &'static regex::Regex {
 /// anchors (`#heading`, `[[#heading]]`) are skipped.
 pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 	let mut found: Vec<(usize, ExtractedLink)> = Vec::new();
-	for caps in wikilink_re().captures_iter(content) {
+	let mut in_fence: Option<&str> = None;
+	let mut offset = 0;
+	for line in content.split_inclusive('\n') {
+		let trimmed = line.trim_start();
+		if let Some(fence) = fence_marker(trimmed) {
+			if in_fence == Some(fence) {
+				in_fence = None;
+			} else if in_fence.is_none() {
+				in_fence = Some(fence);
+			}
+			offset += line.len();
+			continue;
+		}
+		if in_fence.is_some() {
+			offset += line.len();
+			continue;
+		}
+		extract_line_links(line, offset, &mut found);
+		offset += line.len();
+	}
+	found.sort_by_key(|(start, _)| *start);
+	found.into_iter().map(|(_, link)| link).collect()
+}
+
+fn extract_line_links(line: &str, offset: usize, found: &mut Vec<(usize, ExtractedLink)>) {
+	let code_spans = inline_code_spans(line);
+	for caps in wikilink_re().captures_iter(line) {
 		let whole = caps.get(0).expect("capture 0");
+		if range_in_ranges(whole.start(), whole.end(), &code_spans) {
+			continue;
+		}
 		// Alias splits first ([[target#heading|alias]]), then the fragment.
 		let inner = &caps[1];
 		let target = inner.split('|').next().unwrap_or(inner);
@@ -108,7 +138,7 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 			continue;
 		}
 		found.push((
-			whole.start(),
+			offset + whole.start(),
 			ExtractedLink {
 				raw: whole.as_str().to_string(),
 				target: target.to_string(),
@@ -118,8 +148,11 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 			},
 		));
 	}
-	for caps in markdown_re().captures_iter(content) {
+	for caps in markdown_re().captures_iter(line) {
 		let whole = caps.get(0).expect("capture 0");
+		if range_in_ranges(whole.start(), whole.end(), &code_spans) {
+			continue;
+		}
 		// CommonMark allows a quoted title after the destination:
 		// `[text](dest "title")` — the title is not part of the target.
 		let inner = strip_markdown_title(caps[1].trim());
@@ -140,7 +173,7 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 			continue;
 		}
 		found.push((
-			whole.start(),
+			offset + whole.start(),
 			ExtractedLink {
 				raw: whole.as_str().to_string(),
 				// Markdown destinations are URLs: `My%20Note.md` on disk is
@@ -152,8 +185,12 @@ pub(crate) fn extract_links(content: &str) -> Vec<ExtractedLink> {
 			},
 		));
 	}
-	found.sort_by_key(|(start, _)| *start);
-	found.into_iter().map(|(_, link)| link).collect()
+}
+
+fn range_in_ranges(start: usize, end: usize, ranges: &[(usize, usize)]) -> bool {
+	ranges
+		.iter()
+		.any(|(range_start, range_end)| *range_start <= start && end <= *range_end)
 }
 
 /// Strips a trailing CommonMark link title — `"…"` or `'…'` preceded by
@@ -496,6 +533,41 @@ mod tests {
 		let links = extract_links("[md first](a.md) then [[wiki]] then [md again](b.md)\n");
 		let raws: Vec<&str> = links.iter().map(|l| l.raw.as_str()).collect();
 		assert_eq!(raws, vec!["[md first](a.md)", "[[wiki]]", "[md again](b.md)"]);
+	}
+
+	#[test]
+	fn skips_links_inside_backtick_code_fences() {
+		let links = extract_links("before [[Before]]\n```\n[[X]] ![[X]] [md](x.md)\n```\nafter [[After]]\n");
+		let raws: Vec<&str> = links.iter().map(|l| l.raw.as_str()).collect();
+		assert_eq!(raws, vec!["[[Before]]", "[[After]]"]);
+	}
+
+	#[test]
+	fn skips_links_inside_tilde_code_fences() {
+		let links = extract_links("~~~rust\n[[X]] ![[X]] [md](x.md)\n~~~\n[[After]]\n");
+		let raws: Vec<&str> = links.iter().map(|l| l.raw.as_str()).collect();
+		assert_eq!(raws, vec!["[[After]]"]);
+	}
+
+	#[test]
+	fn skips_links_inside_inline_code_spans() {
+		let links = extract_links("ignore `[[X]]` and ``![[Y]] [md](x.md)`` but keep [[After]]\n");
+		let raws: Vec<&str> = links.iter().map(|l| l.raw.as_str()).collect();
+		assert_eq!(raws, vec!["[[After]]"]);
+	}
+
+	#[test]
+	fn skips_links_after_unclosed_code_fence() {
+		let links = extract_links("[[Before]]\n```\n[[X]]\n![[X]]\n[md](x.md)\n");
+		let raws: Vec<&str> = links.iter().map(|l| l.raw.as_str()).collect();
+		assert_eq!(raws, vec!["[[Before]]"]);
+	}
+
+	#[test]
+	fn extracts_links_on_lines_after_closed_code_fence() {
+		let links = extract_links("```\n[[X]]\n```\n[[After]] [md](x.md)\n");
+		let raws: Vec<&str> = links.iter().map(|l| l.raw.as_str()).collect();
+		assert_eq!(raws, vec!["[[After]]", "[md](x.md)"]);
 	}
 
 	#[test]

@@ -181,7 +181,7 @@ fn body_start(content: &str) -> usize {
 	0
 }
 
-fn fence_marker(trimmed_line: &str) -> Option<&'static str> {
+pub(crate) fn fence_marker(trimmed_line: &str) -> Option<&'static str> {
 	if trimmed_line.starts_with("```") {
 		Some("```")
 	} else if trimmed_line.starts_with("~~~") {
@@ -191,7 +191,7 @@ fn fence_marker(trimmed_line: &str) -> Option<&'static str> {
 	}
 }
 
-fn inline_code_spans(line: &str) -> Vec<(usize, usize)> {
+pub(crate) fn inline_code_spans(line: &str) -> Vec<(usize, usize)> {
 	let bytes = line.as_bytes();
 	let mut ranges = Vec::new();
 	let mut i = 0;
