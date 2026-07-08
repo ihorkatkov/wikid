@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/ihorkatkov/wikid/actions/workflows/ci.yml/badge.svg)](https://github.com/ihorkatkov/wikid/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/ihorkatkov/wikid)](https://github.com/ihorkatkov/wikid/releases)
+[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **wikid: a single Rust binary that exposes plain-Markdown wiki directories to remote agents over CLI and MCP. Give every coding agent on every machine one shared, plain-Markdown knowledge base.**
