@@ -27,7 +27,7 @@
 
 Every command accepts `--json`. Success output is one JSON object on stdout. Errors are also stdout and exit 1. Usage errors are clap errors and exit 2.
 
-Optional fields are omitted when absent. Human `hint:` lines do not appear in JSON success output.
+Optional fields are omitted when absent. Human `hint:` lines do not appear in JSON success output. Selecting a local wiki or named `[remotes.<name>]` profile does not change any command's JSON shape. On Unix, an exposed token-bearing config may produce a permission warning on stderr; stdout remains exactly one JSON object.
 
 ## skills
 

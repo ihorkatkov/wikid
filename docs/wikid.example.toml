@@ -1,4 +1,4 @@
-# wikid daemon configuration (`wikid serve --config <path>`).
+# wikid configuration for daemon wikis and client remote profiles.
 #
 # Discovery order when --config is omitted:
 #   $WIKID_CONFIG → ./wikid.toml → ~/.config/wikid/config.toml
@@ -12,9 +12,8 @@
 # refused off-loopback.
 bind = "127.0.0.1:7448"
 
-# Optional fallback when zero-target local commands are run outside any
-# registered wiki and more than one wiki is configured. `wikid init`/bootstrap
-# set this only for the first registration into an empty config.
+# Optional fallback across local [wikis] and client [remotes] when no target
+# is selected. `wikid init`/bootstrap set this for the first local registration.
 default_wiki = "projects"
 
 # Wiki name → directory of Markdown files. An existing Obsidian vault works
@@ -22,6 +21,16 @@ default_wiki = "projects"
 [wikis]
 projects = "/home/you/wikis/projects"
 notes = "/home/you/notes"
+
+# Client-only name → remote daemon connection. Use `wikid --wiki team status`.
+# `server` is required; `token` is optional; `wiki` defaults to the profile
+# name when omitted. Put token-bearing profiles in the global 0600 config, not
+# a repo-local wikid.toml. Do not also register a local mirror of this vault in
+# [wikis]: cwd-local discovery intentionally wins over a remote default.
+[remotes.team]
+server = "https://wiki.example.com"
+token = "wkd_remote_secret"
+wiki = "shared"
 
 # Bearer token → actor name. Actor names appear in the request log. The token
 # string is the secret. `wikid serve` and `wikid init` never print generated

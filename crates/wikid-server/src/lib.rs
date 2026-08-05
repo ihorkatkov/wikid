@@ -75,6 +75,7 @@ mod tests {
 			default_wiki: None,
 			wikis: BTreeMap::from([("main".to_owned(), dir.path().to_path_buf())]),
 			tokens: BTreeMap::new(),
+			remotes: BTreeMap::new(),
 		};
 		let err = serve(config).await.unwrap_err();
 		assert!(err.to_string().contains("refusing to serve"), "got: {err:#}");
@@ -87,6 +88,7 @@ mod tests {
 			default_wiki: None,
 			wikis: BTreeMap::from([("ghost".to_owned(), PathBuf::from("/nonexistent/wiki"))]),
 			tokens: BTreeMap::from([("t".to_owned(), "actor".to_owned())]),
+			remotes: BTreeMap::new(),
 		};
 		let err = serve(config).await.unwrap_err();
 		assert!(format!("{err:#}").contains("ghost"), "got: {err:#}");

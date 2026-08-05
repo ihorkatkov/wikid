@@ -45,11 +45,11 @@ struct Cli {
 	#[arg(long, global = true, value_name = "URL")]
 	server: Option<String>,
 
-	/// Bearer token for remote mode (or $WIKID_TOKEN)
+	/// Bearer token for direct remote mode or a named profile override (or $WIKID_TOKEN)
 	#[arg(long, global = true, value_name = "TOKEN")]
 	token: Option<String>,
 
-	/// Wiki name on the remote daemon (or $WIKID_WIKI)
+	/// Daemon wiki with --server/$WIKID_SERVER; otherwise a local/remote config target name
 	#[arg(long, global = true, value_name = "NAME")]
 	wiki: Option<String>,
 
@@ -288,9 +288,10 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 	let explicit_wiki = cli.wiki;
 	let env_dir = env_var("WIKID_DIR");
 	let env_server = env_var("WIKID_SERVER");
-	let has_explicit_local = explicit_dir.is_some();
-	let has_explicit_remote = explicit_server.is_some() || explicit_token.is_some() || explicit_wiki.is_some();
-	if !has_explicit_local && !has_explicit_remote && env_dir.is_some() && env_server.is_some() {
+	let env_token = env_var("WIKID_TOKEN");
+	let env_wiki = env_var("WIKID_WIKI");
+	let has_explicit_target = explicit_dir.is_some() || explicit_server.is_some() || explicit_wiki.is_some();
+	if !has_explicit_target && explicit_token.is_none() && env_dir.is_some() && env_server.is_some() {
 		// Flag-vs-flag conflicts are caught by clap itself; this covers env-only
 		// local+remote targeting. Explicit flags win over opposite-mode env vars.
 		Cli::command()
@@ -300,31 +301,34 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 			)
 			.exit();
 	}
-	let dir = explicit_dir.or_else(|| (!has_explicit_remote).then_some(env_dir).flatten());
-	let server = explicit_server.or_else(|| (!has_explicit_local).then_some(env_server).flatten());
-	if has_explicit_remote && server.is_none() {
+	let backend = if let Some(dir) = explicit_dir {
+		open_local_backend(Path::new(&dir))?
+	} else if let Some(server) = explicit_server {
+		let wiki = explicit_wiki.or(env_wiki).ok_or_else(CliError::no_wiki)?;
+		Backend::Remote(Remote::new(&server, explicit_token.or(env_token), wiki))
+	} else if let Some(name) = explicit_wiki {
+		match resolve_config_target(cli.config.as_deref(), Some(&name), explicit_token, env_token)? {
+			Some(target) => target.into_backend()?,
+			None => {
+				return Err(CliError::new(
+					"no_target",
+					format!("no configured wiki target found for {name:?}"),
+					Some(
+						"--wiki without --server selects [wikis]/[remotes]; to override $WIKID_WIKI on $WIKID_SERVER, also pass --server"
+							.to_owned(),
+					),
+				));
+			}
+		}
+	} else if let Some(server) = env_server {
+		let wiki = env_wiki.ok_or_else(CliError::no_wiki)?;
+		Backend::Remote(Remote::new(&server, explicit_token.or(env_token), wiki))
+	} else if explicit_token.is_some() {
 		return Err(CliError::no_target());
-	}
-	let backend = if let Some(server) = server {
-		let token = explicit_token.or_else(|| env_var("WIKID_TOKEN"));
-		let wiki = explicit_wiki
-			.or_else(|| env_var("WIKID_WIKI"))
-			.ok_or_else(CliError::no_wiki)?;
-		Backend::Remote(Remote::new(&server, token, wiki))
-	} else if let Some(dir) = dir {
-		// A missing vault directory deserves better than the generic
-		// not-found hint ("run ls…" — there is nothing to ls yet).
-		let vault = Vault::open(&dir).map_err(|err| match err {
-			wikid_core::WikidError::NotFound { path } => CliError::new(
-				"not_found",
-				format!("wiki directory not found: {path}"),
-				Some("pass an existing directory via --dir or $WIKID_DIR".to_owned()),
-			),
-			other => CliError::from(other),
-		})?;
-		Backend::Local(vault)
-	} else if let Some(resolved) = resolve_config_target(cli.config.as_deref())? {
-		Backend::Local(Vault::open(&resolved.path)?)
+	} else if let Some(dir) = env_dir {
+		open_local_backend(Path::new(&dir))?
+	} else if let Some(target) = resolve_config_target(cli.config.as_deref(), None, None, env_token)? {
+		target.into_backend()?
 	} else {
 		return Err(CliError::no_target());
 	};
@@ -434,6 +438,7 @@ fn run_token(command: TokenCommand, config_arg: Option<&str>, json: bool) -> Res
 			let path = wikid_server::config::discover(config_arg.map(Path::new)).ok_or_else(CliError::no_config)?;
 			let config =
 				wikid_server::Config::load(&path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+			warn_insecure_config(&path, &config);
 			let actor = actor.unwrap_or_else(|| "admin".to_owned());
 			let mut matches: Vec<_> = config.tokens.iter().filter(|(_, name)| *name == &actor).collect();
 			if matches.is_empty() {
@@ -523,8 +528,36 @@ struct RegisterResult {
 	registered: bool,
 }
 
-struct ConfigTarget {
-	path: PathBuf,
+enum ConfigTarget {
+	Local(PathBuf),
+	Remote {
+		server: String,
+		token: Option<String>,
+		wiki: String,
+	},
+}
+
+impl ConfigTarget {
+	fn into_backend(self) -> Result<Backend, CliError> {
+		match self {
+			Self::Local(path) => open_local_backend(&path),
+			Self::Remote { server, token, wiki } => Ok(Backend::Remote(Remote::new(&server, token, wiki))),
+		}
+	}
+}
+
+fn open_local_backend(dir: &Path) -> Result<Backend, CliError> {
+	// A missing vault directory deserves better than the generic not-found
+	// hint ("run ls…" — there is nothing to ls yet).
+	let vault = Vault::open(dir).map_err(|err| match err {
+		wikid_core::WikidError::NotFound { path } => CliError::new(
+			"not_found",
+			format!("wiki directory not found: {path}"),
+			Some("pass an existing directory via --dir or $WIKID_DIR".to_owned()),
+		),
+		other => CliError::from(other),
+	})?;
+	Ok(Backend::Local(vault))
 }
 
 fn load_or_bootstrap_config(
@@ -536,6 +569,7 @@ fn load_or_bootstrap_config(
 	{
 		let config =
 			wikid_server::Config::load(&path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+		warn_insecure_config(&path, &config);
 		return Ok((path, config, false));
 	}
 	let path = wikid_server::config::write_target(requested).ok_or_else(CliError::no_config)?;
@@ -641,44 +675,132 @@ fn create_skeleton(root: &Path) -> Result<ScaffoldResult, CliError> {
 	Ok(ScaffoldResult { created, skipped })
 }
 
-fn resolve_config_target(config_arg: Option<&str>) -> Result<Option<ConfigTarget>, CliError> {
+fn resolve_config_target(
+	config_arg: Option<&str>,
+	requested_name: Option<&str>,
+	token_override: Option<String>,
+	token_fallback: Option<String>,
+) -> Result<Option<ConfigTarget>, CliError> {
 	let Some(path) = wikid_server::config::discover(config_arg.map(Path::new)) else {
 		return Ok(None);
 	};
 	let config = wikid_server::Config::load(&path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+	warn_insecure_config(&path, &config);
+	if let Some(name) = requested_name {
+		return named_config_target(&config, name, token_override, token_fallback, &path).map(Some);
+	}
 	let cwd = std::env::current_dir()
 		.map_err(io_error)?
 		.canonicalize()
 		.map_err(io_error)?;
-	if let Some((_, path)) = config
+	if let Some((_, local_path)) = config
 		.wikis
 		.iter()
 		.filter_map(|(name, path)| path.canonicalize().ok().map(|path| (name, path)))
 		.filter(|(_, path)| cwd.starts_with(path))
 		.max_by_key(|(_, path)| path.components().count())
 	{
-		return Ok(Some(ConfigTarget { path }));
+		return Ok(Some(ConfigTarget::Local(local_path)));
 	}
-	if config.wikis.len() == 1 {
-		return Ok(Some(ConfigTarget {
-			path: config.wikis.values().next().unwrap().clone(),
-		}));
-	}
-	if config.wikis.is_empty() {
+	let target_count = config.wikis.len() + config.remotes.len();
+	if target_count == 0 {
 		return Ok(None);
 	}
-	if let Some(default) = &config.default_wiki
-		&& let Some(path) = config.wikis.get(default)
-	{
-		return Ok(Some(ConfigTarget { path: path.clone() }));
+	if target_count == 1 {
+		if let Some(local_path) = config.wikis.values().next() {
+			return Ok(Some(ConfigTarget::Local(local_path.clone())));
+		}
+		let (name, remote) = config.remotes.iter().next().unwrap();
+		return Ok(Some(remote_config_target(name, remote, token_override, token_fallback)));
 	}
-	let names = config.wikis.keys().cloned().collect::<Vec<_>>().join(", ");
+	if let Some(default) = &config.default_wiki
+		&& (config.wikis.contains_key(default) || config.remotes.contains_key(default))
+	{
+		return named_config_target(&config, default, token_override, token_fallback, &path).map(Some);
+	}
+	let names = config_target_names(&config).join(", ");
 	Err(CliError::new(
 		"ambiguous_wiki",
-		format!("multiple wikis registered: {names}"),
+		format!("multiple local/remote wikis registered: {names}"),
 		Some(format!("set default_wiki in {} or pass --dir/--wiki", path.display())),
 	))
 }
+
+fn named_config_target(
+	config: &wikid_server::Config,
+	name: &str,
+	token_override: Option<String>,
+	token_fallback: Option<String>,
+	config_path: &Path,
+) -> Result<ConfigTarget, CliError> {
+	match (config.wikis.get(name), config.remotes.get(name)) {
+		(Some(_), Some(_)) => Err(CliError::new(
+			"ambiguous_wiki",
+			format!("wiki name {name:?} is configured as both local and remote"),
+			Some(format!(
+				"rename one of the duplicate targets in {}",
+				config_path.display()
+			)),
+		)),
+		(Some(path), None) => Ok(ConfigTarget::Local(path.clone())),
+		(None, Some(remote)) => Ok(remote_config_target(name, remote, token_override, token_fallback)),
+		(None, None) => Err(CliError::new(
+			"unknown_wiki",
+			format!(
+				"unknown configured wiki {name:?}; available: {}",
+				config_target_names(config).join(", ")
+			),
+			Some(format!(
+				"inspect [wikis]/[remotes] in {}; --wiki alone selects config, so also pass --server for a daemon wiki",
+				config_path.display()
+			)),
+		)),
+	}
+}
+
+fn remote_config_target(
+	name: &str,
+	remote: &wikid_server::config::RemoteProfile,
+	token_override: Option<String>,
+	token_fallback: Option<String>,
+) -> ConfigTarget {
+	ConfigTarget::Remote {
+		server: remote.server.clone(),
+		token: token_override.or_else(|| remote.token.clone()).or(token_fallback),
+		wiki: remote.wiki.clone().unwrap_or_else(|| name.to_owned()),
+	}
+}
+
+fn config_target_names(config: &wikid_server::Config) -> Vec<String> {
+	let mut names = config
+		.wikis
+		.keys()
+		.chain(config.remotes.keys())
+		.cloned()
+		.collect::<Vec<_>>();
+	names.sort();
+	names.dedup();
+	names
+}
+
+#[cfg(unix)]
+fn warn_insecure_config(path: &Path, config: &wikid_server::Config) {
+	use std::os::unix::fs::PermissionsExt as _;
+	let has_secrets = !config.tokens.is_empty() || config.remotes.values().any(|remote| remote.token.is_some());
+	let is_exposed = std::fs::metadata(path)
+		.map(|metadata| metadata.permissions().mode() & 0o077 != 0)
+		.unwrap_or(false);
+	if has_secrets && is_exposed {
+		eprintln!(
+			"warning: config {} contains tokens and is accessible by group/other users; run chmod 600 {}",
+			path.display(),
+			path.display()
+		);
+	}
+}
+
+#[cfg(not(unix))]
+fn warn_insecure_config(_path: &Path, _config: &wikid_server::Config) {}
 
 fn render_init(result: &InitResult) -> String {
 	let mut lines = vec![format!("initialized wiki: {}", result.path)];

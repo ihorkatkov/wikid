@@ -625,7 +625,7 @@ fn dir_and_server_together_is_a_usage_error() {
 }
 
 #[test]
-fn remote_mode_without_a_server_does_not_fall_back_to_config() {
+fn wiki_without_a_server_selects_config_but_token_alone_is_not_a_target() {
 	let config_vault = fixture_vault();
 	let cwd = TempDir::new().unwrap();
 	let config_path = cwd.path().join("wikid.toml");
@@ -641,8 +641,8 @@ fn remote_mode_without_a_server_does_not_fall_back_to_config() {
 		.current_dir(cwd.path())
 		.args(["--wiki", "configured", "status"])
 		.assert()
-		.code(1)
-		.stdout(predicate::str::starts_with("error[no_target]:"));
+		.success()
+		.stdout(predicate::str::contains(config_vault.path().display().to_string()));
 	wikid_untargeted()
 		.current_dir(cwd.path())
 		.args(["--token", "t", "status"])
@@ -980,6 +980,26 @@ fn init_collision_suffix_and_token_show() {
 	assert_eq!(json["actor"], "admin");
 	assert_eq!(json["token"], token);
 	assert_eq!(json["config_path"], config_path.display().to_string());
+}
+
+#[cfg(unix)]
+#[test]
+fn token_show_warns_on_exposed_config_without_corrupting_json() {
+	use std::os::unix::fs::PermissionsExt as _;
+	let dir = TempDir::new().unwrap();
+	let config_path = dir.path().join("wikid.toml");
+	fs::write(&config_path, "[tokens]\nsecret = \"admin\"\n").unwrap();
+	fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+	let mut cmd = wikid_untargeted();
+	let output = cmd
+		.args(["--config", config_path.to_str().unwrap(), "token", "show", "--json"])
+		.output()
+		.unwrap();
+	assert!(output.status.success());
+	let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+	assert_eq!(value["token"], "secret");
+	let stderr = String::from_utf8(output.stderr).unwrap();
+	assert!(stderr.contains("chmod 600"), "{stderr}");
 }
 
 #[test]

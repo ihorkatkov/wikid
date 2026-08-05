@@ -30,6 +30,20 @@ pub struct Config {
 	/// Bearer token -> actor name.
 	#[serde(default)]
 	pub tokens: BTreeMap<String, String>,
+	/// Client-only named remote targets. The daemon ignores this table.
+	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+	pub remotes: BTreeMap<String, RemoteProfile>,
+}
+
+/// A complete client connection target under `[remotes.<name>]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteProfile {
+	pub server: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub token: Option<String>,
+	/// Wiki name on the daemon; defaults to the profile name when omitted.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub wiki: Option<String>,
 }
 
 fn default_bind() -> String {
@@ -53,6 +67,7 @@ impl Config {
 			default_wiki: None,
 			wikis: BTreeMap::new(),
 			tokens: BTreeMap::new(),
+			remotes: BTreeMap::new(),
 		}
 	}
 }
@@ -150,6 +165,48 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn parses_named_remote_profiles() {
+		let config = Config::from_toml(
+			r#"
+			default_wiki = "projects"
+
+			[remotes.projects]
+			server = "https://projects-wiki.example"
+			token = "wkd_client_secret"
+			wiki = "shared"
+			"#,
+		)
+		.unwrap();
+		let remote = &config.remotes["projects"];
+		assert_eq!(remote.server, "https://projects-wiki.example");
+		assert_eq!(remote.token.as_deref(), Some("wkd_client_secret"));
+		assert_eq!(remote.wiki.as_deref(), Some("shared"));
+	}
+
+	#[test]
+	fn remote_token_and_wiki_are_optional() {
+		let config = Config::from_toml("[remotes.public]\nserver = \"http://127.0.0.1:7448\"\n").unwrap();
+		let remote = &config.remotes["public"];
+		assert_eq!(remote.token, None);
+		assert_eq!(remote.wiki, None);
+	}
+
+	#[test]
+	fn serialization_preserves_profiles_but_omits_an_empty_remotes_table() {
+		let empty = toml::to_string_pretty(&Config::empty()).unwrap();
+		assert!(!empty.contains("remotes"));
+		let config = Config::from_toml(
+			"default_wiki = \"team\"\n[wikis]\nlocal = \"/tmp/wiki\"\n[remotes.team]\nserver = \"https://wiki.example\"\n",
+		)
+		.unwrap();
+		let serialized = toml::to_string_pretty(&config).unwrap();
+		let reparsed = Config::from_toml(&serialized).unwrap();
+		assert_eq!(reparsed.default_wiki.as_deref(), Some("team"));
+		assert!(reparsed.wikis.contains_key("local"));
+		assert_eq!(reparsed.remotes["team"].server, "https://wiki.example");
+	}
+
+	#[test]
 	fn parses_minimal_config() {
 		let config = Config::from_toml(
 			r#"
@@ -172,6 +229,26 @@ mod tests {
 		let config = Config::from_toml("bind = \"127.0.0.1:7448\"").unwrap();
 		assert!(config.wikis.is_empty());
 		assert_eq!(config.bind, "127.0.0.1:7448");
+	}
+
+	#[test]
+	fn save_preserves_remote_profiles_during_real_config_rewrite() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("wikid.toml");
+		std::fs::write(
+			&path,
+			"default_wiki = \"team\"\n[remotes.team]\nserver = \"https://wiki.example\"\ntoken = \"remote-secret\"\nwiki = \"shared\"\n",
+		)
+		.unwrap();
+		let mut config = Config::load(&path).unwrap();
+		config.tokens.insert("server-secret".to_owned(), "admin".to_owned());
+		save(&path, &config).unwrap();
+		let rewritten = Config::load(&path).unwrap();
+		let remote = &rewritten.remotes["team"];
+		assert_eq!(remote.server, "https://wiki.example");
+		assert_eq!(remote.token.as_deref(), Some("remote-secret"));
+		assert_eq!(remote.wiki.as_deref(), Some("shared"));
+		assert_eq!(rewritten.tokens["server-secret"], "admin");
 	}
 
 	#[test]

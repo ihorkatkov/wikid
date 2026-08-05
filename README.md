@@ -63,14 +63,19 @@ If no config exists, `serve` creates `~/.config/wikid/config.toml`, registers th
 
 ### 3. Use it from anywhere
 
-From any VM, any agent — same commands, same output, over HTTP:
+From any VM, any agent — same commands, same output, over HTTP. Save the connection once in `~/.config/wikid/config.toml`:
+
+```toml
+[remotes.notes]
+server = "http://127.0.0.1:7448"
+token = "wkd_..."
+wiki = "notes"
+```
+
+Then use it by profile name (or set `default_wiki = "notes"` and omit `--wiki`):
 
 ```sh
-export WIKID_SERVER=http://127.0.0.1:7448
-export WIKID_TOKEN=...
-export WIKID_WIKI=notes
-
-wikid status
+wikid --wiki notes status
 wikid grep "auth flow"
 wikid cat architecture.md
 wikid cat architecture.md#Decision        # read one heading section
@@ -84,7 +89,7 @@ printf '%s' '[{"line":4,"expected_hash":"3b39a78cfdcb","new_text":"status: final
 
 In remote mode, `status` labels the root as `root (server): ...`. That path lives on the machine running `wikid serve`; use `wikid cat`/`grep`/`edit` from the client, not local shell file commands against that path.
 
-(`--server`, `--token`, and `--wiki` flags work too. Network exposure is your choice: localhost, tailscale, or public + TLS.)
+Direct `--server`/`--token`/`--wiki` flags and `WIKID_SERVER`/`WIKID_TOKEN`/`WIKID_WIKI` env vars still work. One intentional precedence change: `--wiki` without an explicit `--server` always selects a config target and ignores `WIKID_SERVER`. To override `WIKID_WIKI` on an env-configured daemon, pass `--server "$WIKID_SERVER" --wiki <daemon-wiki>`. Network exposure is your choice: localhost, tailscale, or public + TLS.
 
 ### Local mode
 
@@ -107,7 +112,7 @@ You don't have to write it by hand: both `wikid init` and `wikid serve` bootstra
 # Binding beyond loopback requires at least one token.
 bind = "127.0.0.1:7448"
 
-# Fallback wiki for zero-target local commands run outside any registered wiki.
+# Fallback local wiki or remote profile for zero-target commands.
 default_wiki = "notes"
 
 # Wiki name → directory. One daemon serves many wikis;
@@ -120,19 +125,28 @@ projects = "/home/you/wikis/projects"
 # Omit the table entirely to serve loopback-only without auth.
 [tokens]
 "wkd_change_me" = "agent-vm-1"
+
+# Client-only named remote targets. `wiki` defaults to the profile name;
+# `token` is optional for auth-less loopback daemons.
+[remotes.projects-wiki]
+server = "https://projects-wiki.example"
+token = "wkd_remote_secret"
+wiki = "projects"
 ```
 
-On the client side, every remote setting is a flag with an env-var twin, so you can bake a connection into an agent VM's environment once:
+Keep configs containing tokens private (`chmod 600 ~/.config/wikid/config.toml`). On Unix, wikid warns on stderr if a discovered token-bearing config is group/world-accessible. A profile with no `token` falls back to ambient `WIKID_TOKEN`; unset it when the target must receive no Authorization header.
+
+Direct remote mode also exposes flag/env pairs:
 
 | Flag | Env var | Meaning |
 |---|---|---|
 | `--server` | `WIKID_SERVER` | Remote daemon URL |
 | `--token` | `WIKID_TOKEN` | Bearer token |
-| `--wiki` | `WIKID_WIKI` | Wiki name on the daemon |
+| `--wiki` | `WIKID_WIKI` | Flag: daemon wiki with a server or config target name; env: daemon wiki with `WIKID_SERVER` |
 | `--dir` | `WIKID_DIR` | Local directory (local mode) |
 | `--config` | `WIKID_CONFIG` | Config file path |
 
-With none of these set, wikid reads config and picks the wiki containing the current directory, the only registered wiki, or `default_wiki`.
+With none of these set, wikid reads config and picks the local wiki containing the current directory, the only target across `[wikis]` and `[remotes]`, or unified `default_wiki`. `--wiki <name>` without a server selects that name across both tables.
 
 ## The surface
 
@@ -194,7 +208,7 @@ wikid --dir examples/llm-wiki doctor
 - **Plain files are the product.** The runtime holds no state that isn't derivable from the Markdown itself.
 - **Your substrate owns history.** Versioning, backup, and undo belong to git, Dropbox, or whatever holds the directory — wikid never touches them. Writes are atomic, last-write-wins.
 - **Obsidian-compatible by construction.** YAML frontmatter, `[[wikilinks]]` with aliases, `.obsidian/` ignored. Every feature degrades gracefully when a convention isn't used.
-- **Named bearer tokens** for auth. One TOML config: wikis, tokens, bind address.
+- **Named bearer tokens** for auth. One TOML config: local wikis, client remote profiles, server tokens, bind address.
 - **One operation core.** CLI, HTTP, and (next) MCP are thin views over the same operations in `wikid-core` — same behavior and shared JSON wire structs everywhere. Human remote `status` labels `root` as server-side so agents do not mistake it for a local path.
 
 Full spec: [docs/SPEC.md](docs/SPEC.md) · implementation blueprint: [docs/DESIGN.md](docs/DESIGN.md)

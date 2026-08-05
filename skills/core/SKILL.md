@@ -1,6 +1,6 @@
 ---
 name: wikid-core
-description: This skill teaches agents to operate wikid safely when they need to inspect, search, read, edit, link, tag, or lint a plain-Markdown wiki with commands such as wikid status, grep, cat, edit, links, tags, doctor, or remote-mode environment variables.
+description: This skill teaches agents to operate wikid safely when they need to inspect, search, read, edit, link, tag, or lint a plain-Markdown wiki with commands such as wikid status, grep, cat, edit, links, tags, doctor, named remote profiles, or remote-mode environment variables.
 allowed-tools: Bash(wikid:*)
 ---
 
@@ -14,13 +14,26 @@ Local mode targets a directory:
 wikid --dir ~/wiki status
 ```
 
-Remote mode targets a daemon entirely from the client:
+Remote mode can use a named profile in the discovered config:
+
+```toml
+[remotes.team]
+server = "https://wiki.example.com"
+token = "wkd_..."
+wiki = "shared"
+```
+
+```sh
+wikid --wiki team status
+```
+
+The `wiki` and `token` profile fields are optional: `wiki` defaults to the profile name, and tokenless profiles support auth-less loopback daemons. Direct environment targeting remains available:
 
 ```sh
 WIKID_SERVER=http://127.0.0.1:7448 WIKID_TOKEN=wkd_... WIKID_WIKI=team wikid status
 ```
 
-If no target flags are passed, wikid uses config discovery. Bare `wikid` is the same as `wikid status`.
+If no target flags are passed, wikid uses config discovery across local `[wikis]` and client `[remotes]`. `default_wiki` can name either kind. Bare `wikid` is the same as `wikid status`. `--wiki` without an explicit `--server` always selects a config target and ignores `WIKID_SERVER`; pass both flags to override the wiki on an env-configured daemon. A profile without `token` falls back to `WIKID_TOKEN`, so unset it when no Authorization header should be sent. On Unix, fix any token-config permission warning with `chmod 600 <config-path>`; warnings go to stderr and do not alter JSON stdout.
 
 Command names covered by this guide and its full references: skills, serve, init, token, update, status, ls, tree, cat, grep, glob, write, edit, edit-batch, mv, rm, links, tags, doctor.
 

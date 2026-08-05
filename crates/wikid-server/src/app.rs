@@ -426,6 +426,7 @@ mod tests {
 			default_wiki: None,
 			wikis: BTreeMap::from([("main".to_owned(), dir.path().to_path_buf())]),
 			tokens: BTreeMap::from([(TOKEN.to_owned(), "tester".to_owned())]),
+			remotes: BTreeMap::new(),
 		};
 		app(AppState::from_config(&config).unwrap())
 	}
@@ -893,6 +894,7 @@ mod tests {
 			default_wiki: None,
 			wikis: BTreeMap::from([("ghost".to_owned(), PathBuf::from("/nonexistent/wiki"))]),
 			tokens: BTreeMap::new(),
+			remotes: BTreeMap::new(),
 		};
 		let err = AppState::from_config(&config).unwrap_err();
 		assert!(format!("{err:#}").contains("ghost"), "got: {err:#}");

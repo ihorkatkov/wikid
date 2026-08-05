@@ -118,6 +118,26 @@ fn clear_env(cmd: &mut Command) {
 	}
 }
 
+fn write_remote_profile(path: &Path, base: &str, default: Option<&str>) {
+	let mut text = String::new();
+	if let Some(default) = default {
+		text.push_str(&format!("default_wiki = {default:?}\n"));
+	}
+	text.push_str(&format!(
+		"\n[remotes.projects]\nserver = {base:?}\ntoken = {TOKEN:?}\nwiki = {WIKI:?}\n"
+	));
+	write_private_config(path, &text);
+}
+
+fn write_private_config(path: &Path, text: &str) {
+	fs::write(path, text).unwrap();
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt as _;
+		fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+	}
+}
+
 /// Runs the CLI in local mode against the vault; returns (stdout, exit code).
 fn local(vault: &Path, args: &[&str]) -> (String, i32) {
 	let mut cmd = Command::cargo_bin("wikid").expect("binary builds");
@@ -415,6 +435,207 @@ fn remote_mode_matches_local_mode_end_to_end() {
 	);
 }
 
+/// A named remote profile is a complete client target: neither connection
+/// flags nor WIKID_SERVER/WIKID_TOKEN/WIKID_WIKI are required.
+#[test]
+fn config_named_remote_profile_targets_the_daemon() {
+	let vault = fixture_vault();
+	let server = spawn_server(vault.path());
+	let config_dir = TempDir::new().unwrap();
+	let config_path = config_dir.path().join("client.toml");
+	write_remote_profile(&config_path, &server.base, Some("projects"));
+
+	for args in [
+		vec!["--config", config_path.to_str().unwrap(), "status"],
+		vec![
+			"--config",
+			config_path.to_str().unwrap(),
+			"--wiki",
+			"projects",
+			"status",
+		],
+	] {
+		let mut cmd = Command::cargo_bin("wikid").unwrap();
+		clear_env(&mut cmd);
+		let output = cmd.args(args).output().unwrap();
+		assert_eq!(output.status.code(), Some(0), "profile must reach daemon");
+		let stdout = String::from_utf8(output.stdout).unwrap();
+		assert!(stdout.contains("root (server):"), "{stdout}");
+		assert!(stdout.contains(&vault.path().canonicalize().unwrap().display().to_string()));
+	}
+}
+
+#[test]
+fn unified_profile_resolution_honors_defaults_names_env_precedence_and_cwd() {
+	let remote_vault = fixture_vault();
+	let server = spawn_server(remote_vault.path());
+	let local_vault = fixture_vault();
+	let config_dir = TempDir::new().unwrap();
+	let config_path = config_dir.path().join("client.toml");
+	let config = format!(
+		"default_wiki = \"projects\"\n\n[wikis]\nlocal = {:?}\n\n[remotes.projects]\nserver = {:?}\ntoken = {TOKEN:?}\nwiki = {WIKI:?}\n",
+		local_vault.path().display().to_string(),
+		server.base
+	);
+	write_private_config(&config_path, &config);
+
+	// Outside local roots, the unified default selects the remote profile.
+	let mut default_cmd = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut default_cmd);
+	default_cmd
+		.current_dir(config_dir.path())
+		.args(["--config", config_path.to_str().unwrap(), "status"])
+		.assert()
+		.success()
+		.stdout(predicates::str::contains("root (server):"));
+
+	// A named config target wins over opposite-mode env vars.
+	let mut local_cmd = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut local_cmd);
+	let local_output = local_cmd
+		.env("WIKID_SERVER", "http://127.0.0.1:1")
+		.args(["--config", config_path.to_str().unwrap(), "--wiki", "local", "status"])
+		.output()
+		.unwrap();
+	assert!(local_output.status.success());
+	let local_stdout = String::from_utf8(local_output.stdout).unwrap();
+	assert!(local_stdout.contains(&local_vault.path().canonicalize().unwrap().display().to_string()));
+	assert!(!local_stdout.contains("root (server):"));
+
+	let mut remote_cmd = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut remote_cmd);
+	remote_cmd
+		.env("WIKID_DIR", local_vault.path())
+		.env("WIKID_SERVER", "http://127.0.0.1:1")
+		.env("WIKID_TOKEN", "stale-token")
+		.args([
+			"--config",
+			config_path.to_str().unwrap(),
+			"--wiki",
+			"projects",
+			"status",
+		])
+		.assert()
+		.success()
+		.stdout(predicates::str::contains("root (server):"));
+
+	// Cwd-prefix local discovery intentionally beats a remote default.
+	let mut cwd_cmd = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut cwd_cmd);
+	let cwd_output = cwd_cmd
+		.current_dir(local_vault.path())
+		.args(["--config", config_path.to_str().unwrap(), "status"])
+		.output()
+		.unwrap();
+	assert!(cwd_output.status.success());
+	assert!(!String::from_utf8(cwd_output.stdout).unwrap().contains("root (server):"));
+
+	let mut unknown = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut unknown);
+	unknown
+		.args(["--config", config_path.to_str().unwrap(), "--wiki", "missing", "status"])
+		.assert()
+		.code(1)
+		.stdout(predicates::str::starts_with("error[unknown_wiki]:"))
+		.stdout(predicates::str::contains("local"))
+		.stdout(predicates::str::contains("projects"));
+}
+
+#[test]
+fn duplicate_local_and_remote_names_are_ambiguous() {
+	let local_vault = fixture_vault();
+	let config_dir = TempDir::new().unwrap();
+	let config_path = config_dir.path().join("client.toml");
+	write_private_config(
+		&config_path,
+		&format!(
+			"[wikis]\nshared = {:?}\n[remotes.shared]\nserver = \"http://127.0.0.1:1\"\n",
+			local_vault.path().display().to_string()
+		),
+	);
+	let mut cmd = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut cmd);
+	cmd.args(["--config", config_path.to_str().unwrap(), "--wiki", "shared", "status"])
+		.assert()
+		.code(1)
+		.stdout(predicates::str::starts_with("error[ambiguous_wiki]:"));
+}
+
+#[test]
+fn profile_name_defaults_to_daemon_wiki_and_env_token_fills_an_absent_token() {
+	let vault = fixture_vault();
+	let server = spawn_server(vault.path());
+	let config_dir = TempDir::new().unwrap();
+	let config_path = config_dir.path().join("client.toml");
+	write_private_config(&config_path, &format!("[remotes.{WIKI}]\nserver = {:?}\n", server.base));
+	let mut cmd = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut cmd);
+	cmd.env("WIKID_TOKEN", TOKEN)
+		.args(["--config", config_path.to_str().unwrap(), "--wiki", WIKI, "status"])
+		.assert()
+		.success()
+		.stdout(predicates::str::contains("root (server):"));
+}
+
+#[test]
+fn explicit_token_overrides_a_profile_token() {
+	let vault = fixture_vault();
+	let server = spawn_server(vault.path());
+	let config_dir = TempDir::new().unwrap();
+	let config_path = config_dir.path().join("client.toml");
+	fs::write(
+		&config_path,
+		format!(
+			"[remotes.projects]\nserver = {:?}\ntoken = \"wrong\"\nwiki = {WIKI:?}\n",
+			server.base
+		),
+	)
+	.unwrap();
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt as _;
+		fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+	}
+	let mut cmd = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut cmd);
+	cmd.args([
+		"--config",
+		config_path.to_str().unwrap(),
+		"--wiki",
+		"projects",
+		"--token",
+		TOKEN,
+		"status",
+	])
+	.assert()
+	.success();
+}
+
+#[cfg(unix)]
+#[test]
+fn exposed_token_config_warns_on_stderr_without_corrupting_json() {
+	use std::os::unix::fs::PermissionsExt as _;
+	let vault = fixture_vault();
+	let server = spawn_server(vault.path());
+	let config_dir = TempDir::new().unwrap();
+	let config_path = config_dir.path().join("client.toml");
+	write_remote_profile(&config_path, &server.base, Some("projects"));
+	fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+	let mut cmd = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut cmd);
+	let output = cmd
+		.args(["--config", config_path.to_str().unwrap(), "status", "--json"])
+		.output()
+		.unwrap();
+	assert!(output.status.success());
+	let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+	assert_eq!(value["total_pages"], 3);
+	let stderr = String::from_utf8(output.stderr).unwrap();
+	assert!(stderr.contains("warning: config"), "{stderr}");
+	assert!(stderr.contains("chmod 600"), "{stderr}");
+}
+
 /// Remote targeting purely via `WIKID_SERVER`/`WIKID_TOKEN`/`WIKID_WIKI` env
 /// vars — no flags — reaches the daemon and labels `root` as server-side.
 #[test]
@@ -439,6 +660,18 @@ fn env_vars_alone_target_the_remote_daemon() {
 		local_out,
 		"env-var remote status matches local except server-side root label"
 	);
+
+	// An explicit token still composes with an env-provided server/wiki, as it
+	// did before named profiles existed.
+	let mut token_override = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut token_override);
+	token_override
+		.env("WIKID_SERVER", &server.base)
+		.env("WIKID_TOKEN", "wrong")
+		.env("WIKID_WIKI", WIKI)
+		.args(["--token", TOKEN, "status"])
+		.assert()
+		.success();
 }
 
 #[test]
