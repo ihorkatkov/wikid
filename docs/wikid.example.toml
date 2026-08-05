@@ -22,7 +22,7 @@ default_wiki = "projects"
 projects = "/home/you/wikis/projects"
 notes = "/home/you/notes"
 
-# Client-only name → remote daemon connection. Use `wikid --wiki team status`.
+# Client-only name → remote daemon connection. Use `wikid --target team status`.
 # `server` is required; `token` is optional; `wiki` defaults to the profile
 # name when omitted. Put token-bearing profiles in the global 0600 config, not
 # a repo-local wikid.toml. Do not also register a local mirror of this vault in

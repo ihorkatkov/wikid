@@ -2,6 +2,18 @@
 
 All notable user-facing changes to `wikid` are documented here.
 
+## Unreleased
+
+### Added
+
+- `--target <name>` as the unambiguous selector for configured local and remote targets; `--wiki` without `--server` remains a compatibility alias.
+- A token-safe bare `wikid` orientation dashboard listing every configured target, active/default state, active status, and the version-matched skills onboarding hint.
+
+### Changed
+
+- Focused remote status now distinguishes target, daemon wiki, server URL, and client/server versions while omitting the non-actionable server filesystem root from human output.
+- Successful human next-step hints preserve the active target without exposing bearer tokens; explicit `status --json` retains its existing wire shape.
+
 ## [0.3.0] - 2026-08-05
 
 ### Added

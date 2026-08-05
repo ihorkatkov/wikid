@@ -110,15 +110,18 @@ fn assert_doc_hash_line(line: &str, expected_line: &str, expected_text: &str, se
 // --- AXI conformance checklist (DESIGN §6), one test per item ---
 
 #[test]
-fn axi_1_no_args_is_live_status_not_help() {
+fn axi_1_no_args_is_live_overview_not_help() {
 	let vault = fixture_vault();
+	let home = TempDir::new().unwrap();
 	let mut cmd = wikid_untargeted();
-	cmd.env("WIKID_DIR", vault.path());
+	cmd.env("HOME", home.path()).env("WIKID_DIR", vault.path());
 	cmd.assert()
 		.success()
-		.stdout(predicate::str::contains("wiki:"))
-		.stdout(predicate::str::contains("root:"))
+		.stdout(predicate::str::contains("targets:"))
+		.stdout(predicate::str::contains("[active]"))
+		.stdout(predicate::str::contains("active:"))
 		.stdout(predicate::str::contains("pages: 4"))
+		.stdout(predicate::str::contains("hint: wikid skills get core"))
 		.stdout(predicate::str::contains("Usage").not());
 }
 
@@ -281,7 +284,7 @@ fn core_skill_documented_workflow_matches_real_cli_output() {
 		"truncation hint shape no longer matches skills/core/SKILL.md §2: {truncated}"
 	);
 	assert!(
-		truncated.contains("hint: wikid cat concepts/billing.md --lines 1-120 — read a window"),
+		truncated.contains("cat concepts/billing.md --lines 1-120 — read a window"),
 		"truncation next-step hint no longer matches skills/core/SKILL.md §2: {truncated}"
 	);
 
@@ -404,7 +407,7 @@ fn axi_7_human_output_ends_with_hints_json_has_none() {
 	// Hints name a concrete next command (AXI-7), e.g. grep points at cat.
 	let grep = stdout_of(wikid(vault.path()).args(["grep", "needle"]));
 	assert!(
-		grep.contains("hint: wikid cat"),
+		grep.contains(" cat <path> — read a match"),
 		"grep hint names the next step: {grep}"
 	);
 }
@@ -801,7 +804,7 @@ fn config_list_reports_local_and_remote_targets_without_leaking_tokens() {
 	assert!(
 		human
 			.trim_end()
-			.ends_with("hint: wikid --wiki <name> status — inspect one configured target")
+			.ends_with("hint: wikid --target <name> status — inspect one configured target")
 	);
 	assert!(!human.contains("never-print-me"));
 }
@@ -1249,6 +1252,7 @@ fn grep_bad_regex_is_a_structured_error() {
 fn concise_help_documents_config_fragments_embeds_and_tags() {
 	let root_help = stdout_of(wikid_untargeted().arg("--help"));
 	assert!(root_help.contains("config"), "{root_help}");
+	assert!(root_help.contains("--target <NAME>"), "{root_help}");
 	let config_help = stdout_of(wikid_untargeted().args(["config", "list", "--help"]));
 	assert!(
 		config_help.contains("local wiki targets and remote server profiles"),

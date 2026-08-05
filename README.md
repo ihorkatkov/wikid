@@ -72,14 +72,16 @@ token = "wkd_..."
 wiki = "notes"
 ```
 
-List every configured local wiki and remote server, then select a profile by name (or set `default_wiki = "notes"` and omit `--wiki`):
+Bare `wikid` is an orientation dashboard: it lists every configured local/remote target, marks the active/default target, shows that target's live status, and points new agents to the embedded core guide. Select a configured target with `--target` (or set `default_wiki = "notes"` and omit it):
 
 ```sh
-wikid config list
+wikid                              # all targets + active target status
+wikid config list                  # detailed token-safe config inventory
+wikid --target notes status        # focused status for one target
+wikid --target notes grep "auth flow"
 ```
 
 ```sh
-wikid --wiki notes status
 wikid grep "auth flow"
 wikid cat architecture.md
 wikid cat architecture.md#Decision        # read one heading section
@@ -91,9 +93,9 @@ printf '%s' '[{"line":4,"expected_hash":"3b39a78cfdcb","new_text":"status: final
   | wikid edit-batch decisions.md
 ```
 
-In remote mode, `status` labels the root as `root (server): ...`. That path lives on the machine running `wikid serve`; use `wikid cat`/`grep`/`edit` from the client, not local shell file commands against that path.
+Focused remote status identifies the configured target, daemon wiki, server URL, and client/server wikid versions. It omits the daemon's filesystem root from human output because that path is not actionable on the client; `status --json` retains the wire-compatible `root` field.
 
-Direct `--server`/`--token`/`--wiki` flags and `WIKID_SERVER`/`WIKID_TOKEN`/`WIKID_WIKI` env vars still work. One intentional precedence change: `--wiki` without an explicit `--server` always selects a config target and ignores `WIKID_SERVER`. To override `WIKID_WIKI` on an env-configured daemon, pass `--server "$WIKID_SERVER" --wiki <daemon-wiki>`. Network exposure is your choice: localhost, tailscale, or public + TLS.
+Direct `--server`/`--token`/`--wiki` flags and `WIKID_SERVER`/`WIKID_TOKEN`/`WIKID_WIKI` env vars still work. `--target` is the preferred configured-profile selector. For compatibility, `--wiki` without an explicit `--server` remains an alias for `--target` and ignores `WIKID_SERVER`; with direct `--server`, `--wiki` names the daemon wiki. Network exposure is your choice: localhost, tailscale, or public + TLS.
 
 ### Local mode
 
@@ -130,8 +132,8 @@ projects = "/home/you/wikis/projects"
 [tokens]
 "wkd_change_me" = "agent-vm-1"
 
-# Client-only named remote targets. `wiki` defaults to the profile name;
-# `token` is optional for auth-less loopback daemons.
+# Client-only named targets. Select one with `wikid --target projects-wiki`.
+# `wiki` defaults to the target name; `token` is optional for auth-less daemons.
 [remotes.projects-wiki]
 server = "https://projects-wiki.example"
 token = "wkd_remote_secret"
@@ -146,13 +148,14 @@ Direct remote mode also exposes flag/env pairs:
 
 | Flag | Env var | Meaning |
 |---|---|---|
+| `--target` | — | Configured local/remote target name |
 | `--server` | `WIKID_SERVER` | Remote daemon URL |
 | `--token` | `WIKID_TOKEN` | Bearer token |
-| `--wiki` | `WIKID_WIKI` | Flag: daemon wiki with a server or config target name; env: daemon wiki with `WIKID_SERVER` |
+| `--wiki` | `WIKID_WIKI` | Daemon wiki with `--server`; legacy config-target alias without it |
 | `--dir` | `WIKID_DIR` | Local directory (local mode) |
 | `--config` | `WIKID_CONFIG` | Config file path |
 
-With none of these set, wikid reads config and picks the local wiki containing the current directory, the only target across `[wikis]` and `[remotes]`, or unified `default_wiki`. `--wiki <name>` without a server selects that name across both tables.
+With none of these set, wikid reads config and picks the local wiki containing the current directory, the only target across `[wikis]` and `[remotes]`, or unified `default_wiki`. `--target <name>` selects that name across both tables; `--wiki <name>` without a server remains a compatibility alias.
 
 ## The surface
 
@@ -162,7 +165,8 @@ Wiki operation commands work identically in local and remote mode. Client-side m
 |---|---|
 | `skills` | Embedded agent usage guides: list, print, or materialize version-matched SKILL.md files |
 | `config list` | List configured local wiki targets and remote servers without revealing tokens |
-| `status` | Page counts, recent activity, health summary — the no-arg default |
+| bare `wikid` | Orientation dashboard: all configured targets plus active target status and agent-guide hint |
+| `status` | Focused page counts, recent activity, health summary for one target |
 | `ls` / `tree` / `glob` | Find pages by path |
 | `cat` | Read a page or `#Heading` / `#^block-id` fragment (large whole-page reads truncated with a size hint; `--full` or `--lines START-END` to override) |
 | `grep` | Regex search with ranked results and match context |
@@ -216,7 +220,7 @@ wikid --dir examples/llm-wiki doctor
 - **Your substrate owns history.** Versioning, backup, and undo belong to git, Dropbox, or whatever holds the directory — wikid never touches them. Writes are atomic, last-write-wins.
 - **Obsidian-compatible by construction.** YAML frontmatter, `[[wikilinks]]` with aliases, `.obsidian/` ignored. Every feature degrades gracefully when a convention isn't used.
 - **Named bearer tokens** for auth. One TOML config: local wikis, client remote profiles, server tokens, bind address.
-- **One operation core.** CLI, HTTP, and (next) MCP are thin views over the same operations in `wikid-core` — same behavior and shared JSON wire structs everywhere. Human remote `status` labels `root` as server-side so agents do not mistake it for a local path.
+- **One operation core.** CLI, HTTP, and (next) MCP are thin views over the same operations in `wikid-core` — same behavior and shared JSON wire structs everywhere. Human remote status omits the non-actionable server filesystem root while `status --json` preserves the shared wire struct.
 
 Full spec: [docs/SPEC.md](docs/SPEC.md) · implementation blueprint: [docs/DESIGN.md](docs/DESIGN.md)
 

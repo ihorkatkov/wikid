@@ -49,7 +49,16 @@ struct Cli {
 	#[arg(long, global = true, value_name = "TOKEN")]
 	token: Option<String>,
 
-	/// Daemon wiki with --server/$WIKID_SERVER; otherwise a local/remote config target name
+	/// Configured local or remote target name
+	#[arg(
+		long,
+		global = true,
+		value_name = "NAME",
+		conflicts_with_all = ["dir", "server", "wiki"]
+	)]
+	target: Option<String>,
+
+	/// Daemon wiki with --server; without --server, a legacy alias for --target
 	#[arg(long, global = true, value_name = "NAME")]
 	wiki: Option<String>,
 
@@ -85,7 +94,7 @@ enum Command {
 	/// Inspect configured local wikis and remote servers without revealing tokens
 	#[command(
 		display_order = 30,
-		long_about = "Inspect the discovered config's local wiki targets and remote server profiles. Token values are never printed; wiki target flags are ignored."
+		long_about = "Inspect the discovered config's local wiki targets and remote server profiles. Token values are never printed; target-selection flags are ignored."
 	)]
 	Config {
 		#[command(subcommand)]
@@ -285,7 +294,8 @@ fn write_stdout(text: &str, code: i32) -> ! {
 }
 
 fn run(cli: Cli) -> Result<Outcome, CliError> {
-	// AXI checklist item 1: no arguments shows live data, never help text.
+	// Bare `wikid` is the orientation dashboard; explicit `status` stays focused.
+	let overview = cli.command.is_none();
 	let command = cli.command.unwrap_or(Command::Status);
 	let command = match command {
 		Command::Skills { command } => return run_skills(command, cli.json),
@@ -298,15 +308,18 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 		Command::Update { check, force, version } => return run_update(check, force, version.as_deref(), cli.json),
 		other => other,
 	};
+	let config_arg = cli.config;
 	let explicit_dir = cli.dir;
 	let explicit_server = cli.server;
 	let explicit_token = cli.token;
+	let explicit_target = cli.target;
 	let explicit_wiki = cli.wiki;
 	let env_dir = env_var("WIKID_DIR");
 	let env_server = env_var("WIKID_SERVER");
 	let env_token = env_var("WIKID_TOKEN");
 	let env_wiki = env_var("WIKID_WIKI");
-	let has_explicit_target = explicit_dir.is_some() || explicit_server.is_some() || explicit_wiki.is_some();
+	let has_explicit_target =
+		explicit_dir.is_some() || explicit_server.is_some() || explicit_target.is_some() || explicit_wiki.is_some();
 	if !has_explicit_target && explicit_token.is_none() && env_dir.is_some() && env_server.is_some() {
 		// Flag-vs-flag conflicts are caught by clap itself; this covers env-only
 		// local+remote targeting. Explicit flags win over opposite-mode env vars.
@@ -317,38 +330,63 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 			)
 			.exit();
 	}
-	let backend = if let Some(dir) = explicit_dir {
-		open_local_backend(Path::new(&dir))?
+	let selected = if let Some(dir) = explicit_dir {
+		let name = target_name_from_path(Path::new(&dir));
+		open_local_target(
+			Path::new(&dir),
+			name,
+			false,
+			false,
+			format!("--dir {}", shell_arg(&dir)),
+		)?
 	} else if let Some(server) = explicit_server {
 		let wiki = explicit_wiki.or(env_wiki).ok_or_else(CliError::no_wiki)?;
-		Backend::Remote(Remote::new(&server, explicit_token.or(env_token), wiki))
-	} else if let Some(name) = explicit_wiki {
-		match resolve_config_target(cli.config.as_deref(), Some(&name), explicit_token, env_token)? {
-			Some(target) => target.into_backend()?,
+		direct_remote_target(
+			server,
+			explicit_token.clone().or(env_token),
+			wiki,
+			explicit_token.is_some(),
+		)
+	} else if let Some(name) = explicit_target.or(explicit_wiki) {
+		match resolve_config_target(config_arg.as_deref(), Some(&name), explicit_token, env_token)? {
+			Some(target) => target.into_selected(config_arg.as_deref())?,
 			None => {
 				return Err(CliError::new(
 					"no_target",
-					format!("no configured wiki target found for {name:?}"),
-					Some(
-						"--wiki without --server selects [wikis]/[remotes]; to override $WIKID_WIKI on $WIKID_SERVER, also pass --server"
-							.to_owned(),
-					),
+					format!("no configured target found for {name:?}"),
+					Some("run wikid config list or use --server with --wiki for a direct daemon wiki".to_owned()),
 				));
 			}
 		}
 	} else if let Some(server) = env_server {
 		let wiki = env_wiki.ok_or_else(CliError::no_wiki)?;
-		Backend::Remote(Remote::new(&server, explicit_token.or(env_token), wiki))
+		direct_remote_target(
+			server,
+			explicit_token.clone().or(env_token),
+			wiki,
+			explicit_token.is_some(),
+		)
 	} else if explicit_token.is_some() {
 		return Err(CliError::no_target());
 	} else if let Some(dir) = env_dir {
-		open_local_backend(Path::new(&dir))?
-	} else if let Some(target) = resolve_config_target(cli.config.as_deref(), None, None, env_token)? {
-		target.into_backend()?
+		let name = target_name_from_path(Path::new(&dir));
+		open_local_target(
+			Path::new(&dir),
+			name,
+			false,
+			false,
+			format!("--dir {}", shell_arg(&dir)),
+		)?
+	} else if let Some(target) = resolve_config_target(config_arg.as_deref(), None, None, env_token)? {
+		target.into_selected(config_arg.as_deref())?
 	} else {
 		return Err(CliError::no_target());
 	};
-	dispatch(&backend, command, cli.json)
+	if overview {
+		run_overview(&selected, config_arg.as_deref(), cli.json)
+	} else {
+		dispatch(&selected.backend, &selected.context, command, cli.json)
+	}
 }
 
 /// `wikid serve` (DESIGN §6): discover the config (arg → `$WIKID_CONFIG` →
@@ -534,7 +572,7 @@ struct ConfigListResult {
 	targets: Vec<ConfigListTarget>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum ConfigListTarget {
 	Local { name: String, path: String },
@@ -547,6 +585,179 @@ impl ConfigListTarget {
 			Self::Local { name, .. } | Self::Remote { name, .. } => name,
 		}
 	}
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum OverviewTarget {
+	Local {
+		name: String,
+		path: String,
+		active: bool,
+		default: bool,
+		configured: bool,
+	},
+	Remote {
+		name: String,
+		server: String,
+		wiki: String,
+		active: bool,
+		default: bool,
+		configured: bool,
+	},
+}
+
+impl OverviewTarget {
+	fn name(&self) -> &str {
+		match self {
+			Self::Local { name, .. } | Self::Remote { name, .. } => name,
+		}
+	}
+
+	fn is_active(&self) -> bool {
+		match self {
+			Self::Local { active, .. } | Self::Remote { active, .. } => *active,
+		}
+	}
+
+	fn is_default(&self) -> bool {
+		match self {
+			Self::Local { default, .. } | Self::Remote { default, .. } => *default,
+		}
+	}
+
+	fn set_active(&mut self, value: bool) {
+		match self {
+			Self::Local { active, .. } | Self::Remote { active, .. } => *active = value,
+		}
+	}
+
+	fn matches_context(&self, context: &TargetContext) -> bool {
+		match (self, &context.kind) {
+			(Self::Local { path, .. }, TargetKind::Local { path: active_path }) => Path::new(path)
+				.canonicalize()
+				.map(|path| path.display().to_string() == *active_path)
+				.unwrap_or(path == active_path),
+			(
+				Self::Remote { server, wiki, .. },
+				TargetKind::Remote {
+					server: active_server,
+					wiki: active_wiki,
+				},
+			) => server.trim_end_matches('/') == active_server.trim_end_matches('/') && wiki == active_wiki,
+			_ => false,
+		}
+	}
+}
+
+#[derive(Debug, Serialize)]
+struct OverviewResult {
+	targets: Vec<OverviewTarget>,
+	active_target: String,
+	status: VaultStatus,
+}
+
+struct OverviewTargets {
+	targets: Vec<OverviewTarget>,
+	matched_config: Option<MatchedConfigTarget>,
+}
+
+struct MatchedConfigTarget {
+	name: String,
+	is_default: bool,
+}
+
+#[derive(Debug, Clone)]
+enum TargetKind {
+	Local { path: String },
+	Remote { server: String, wiki: String },
+}
+
+#[derive(Debug, Clone)]
+struct TargetContext {
+	name: String,
+	kind: TargetKind,
+	configured: bool,
+	is_default: bool,
+	hint_prefix: String,
+}
+
+impl TargetContext {
+	fn with_target_hints(&self, text: String) -> String {
+		text.lines()
+			.map(|line| {
+				let Some(command) = line.strip_prefix("hint: wikid ") else {
+					return line.to_owned();
+				};
+				if command.starts_with("skills ")
+					|| command.starts_with("--target ")
+					|| command.starts_with("--config ")
+					|| command.starts_with("--server ")
+					|| command.starts_with("--dir ")
+					|| self.hint_prefix.is_empty()
+				{
+					line.to_owned()
+				} else {
+					format!("hint: wikid {} {command}", self.hint_prefix)
+				}
+			})
+			.collect::<Vec<_>>()
+			.join("\n")
+	}
+
+	fn focused_status(&self, status: &VaultStatus) -> String {
+		let mode = match (&self.kind, self.configured) {
+			(TargetKind::Local { .. }, _) => "local",
+			(TargetKind::Remote { .. }, true) => "remote",
+			(TargetKind::Remote { .. }, false) => "direct remote",
+		};
+		let default = if self.is_default { ", default" } else { "" };
+		let mut lines = vec![format!("target: {} ({mode}{default})", self.name)];
+		match &self.kind {
+			TargetKind::Local { .. } => {
+				lines.push(format!("root: {}", status.root));
+				lines.push(format!("wikid: {}", env!("CARGO_PKG_VERSION")));
+			}
+			TargetKind::Remote { server, wiki } => {
+				lines.push(format!("wiki: {wiki}"));
+				lines.push(format!("server: {server}"));
+				lines.push(format!(
+					"wikid: client {}  server {}",
+					env!("CARGO_PKG_VERSION"),
+					status.version
+				));
+			}
+		}
+		lines.push(render::status_body(status));
+		lines.push("hint: wikid grep <pattern> — search this wiki".to_owned());
+		lines.push("hint: wikid doctor — inspect structural issues".to_owned());
+		lines.join("\n")
+	}
+
+	fn synthetic_overview_target(&self) -> OverviewTarget {
+		match &self.kind {
+			TargetKind::Local { path } => OverviewTarget::Local {
+				name: self.name.clone(),
+				path: path.clone(),
+				active: true,
+				default: self.is_default,
+				configured: self.configured,
+			},
+			TargetKind::Remote { server, wiki } => OverviewTarget::Remote {
+				name: self.name.clone(),
+				server: server.clone(),
+				wiki: wiki.clone(),
+				active: true,
+				default: self.is_default,
+				configured: self.configured,
+			},
+		}
+	}
+}
+
+struct SelectedTarget {
+	backend: Backend,
+	context: TargetContext,
 }
 
 #[derive(Debug, Serialize)]
@@ -601,35 +812,288 @@ struct RegisterResult {
 }
 
 enum ConfigTarget {
-	Local(PathBuf),
+	Local {
+		name: String,
+		path: PathBuf,
+		is_default: bool,
+	},
 	Remote {
+		name: String,
 		server: String,
 		token: Option<String>,
 		wiki: String,
+		is_default: bool,
+		token_override: bool,
 	},
 }
 
 impl ConfigTarget {
-	fn into_backend(self) -> Result<Backend, CliError> {
+	fn into_selected(self, config_arg: Option<&str>) -> Result<SelectedTarget, CliError> {
 		match self {
-			Self::Local(path) => open_local_backend(&path),
-			Self::Remote { server, token, wiki } => Ok(Backend::Remote(Remote::new(&server, token, wiki))),
+			Self::Local { name, path, is_default } => {
+				let hint_prefix = config_target_prefix(config_arg, &name, false);
+				open_local_target(&path, name, true, is_default, hint_prefix)
+			}
+			Self::Remote {
+				name,
+				server,
+				token,
+				wiki,
+				is_default,
+				token_override,
+			} => {
+				let hint_prefix = config_target_prefix(config_arg, &name, token_override);
+				Ok(SelectedTarget {
+					backend: Backend::Remote(Remote::new(&server, token, wiki.clone())),
+					context: TargetContext {
+						name,
+						kind: TargetKind::Remote { server, wiki },
+						configured: true,
+						is_default,
+						hint_prefix,
+					},
+				})
+			}
 		}
 	}
 }
 
-fn open_local_backend(dir: &Path) -> Result<Backend, CliError> {
+fn config_target_prefix(config_arg: Option<&str>, target: &str, token_override: bool) -> String {
+	let mut parts = Vec::new();
+	if let Some(config) = config_arg {
+		parts.push(format!("--config {}", shell_arg(config)));
+	}
+	parts.push(format!("--target {}", shell_arg(target)));
+	if token_override {
+		parts.push("--token <TOKEN>".to_owned());
+	}
+	parts.join(" ")
+}
+
+fn open_local_vault(dir: &Path) -> Result<Vault, CliError> {
 	// A missing vault directory deserves better than the generic not-found
 	// hint ("run ls…" — there is nothing to ls yet).
-	let vault = Vault::open(dir).map_err(|err| match err {
+	Vault::open(dir).map_err(|err| match err {
 		wikid_core::WikidError::NotFound { path } => CliError::new(
 			"not_found",
 			format!("wiki directory not found: {path}"),
 			Some("pass an existing directory via --dir or $WIKID_DIR".to_owned()),
 		),
 		other => CliError::from(other),
-	})?;
-	Ok(Backend::Local(vault))
+	})
+}
+
+fn open_local_target(
+	dir: &Path,
+	name: String,
+	configured: bool,
+	is_default: bool,
+	hint_prefix: String,
+) -> Result<SelectedTarget, CliError> {
+	let vault = open_local_vault(dir)?;
+	let path = vault.root().display().to_string();
+	Ok(SelectedTarget {
+		backend: Backend::Local(vault),
+		context: TargetContext {
+			name,
+			kind: TargetKind::Local { path },
+			configured,
+			is_default,
+			hint_prefix,
+		},
+	})
+}
+
+fn direct_remote_target(server: String, token: Option<String>, wiki: String, token_override: bool) -> SelectedTarget {
+	let mut hint_prefix = format!("--server {} --wiki {}", shell_arg(&server), shell_arg(&wiki));
+	if token_override {
+		hint_prefix.push_str(" --token <TOKEN>");
+	}
+	SelectedTarget {
+		backend: Backend::Remote(Remote::new(&server, token, wiki.clone())),
+		context: TargetContext {
+			name: wiki.clone(),
+			kind: TargetKind::Remote { server, wiki },
+			configured: false,
+			is_default: false,
+			hint_prefix,
+		},
+	}
+}
+
+fn target_name_from_path(path: &Path) -> String {
+	path.file_name()
+		.and_then(|name| name.to_str())
+		.filter(|name| !name.is_empty())
+		.unwrap_or("wiki")
+		.to_owned()
+}
+
+fn shell_arg(value: &str) -> String {
+	if !value.is_empty()
+		&& value
+			.chars()
+			.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '@'))
+	{
+		value.to_owned()
+	} else {
+		format!("'{}'", value.replace('\'', "'\"'\"'"))
+	}
+}
+
+fn run_overview(selected: &SelectedTarget, config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> {
+	let status = selected.backend.status()?;
+	let overview_targets = overview_targets(config_arg, &selected.context)?;
+	let mut active = selected.context.clone();
+	if !active.configured
+		&& let Some(matched) = overview_targets.matched_config
+	{
+		let token_override = active.hint_prefix.contains("--token <TOKEN>");
+		active.name = matched.name;
+		active.configured = true;
+		active.is_default = matched.is_default;
+		active.hint_prefix = config_target_prefix(config_arg, &active.name, token_override);
+	}
+	let result = OverviewResult {
+		targets: overview_targets.targets,
+		active_target: active.name.clone(),
+		status,
+	};
+	Ok(Outcome::ok(emit(json, &result, || {
+		render_overview(&result, &active, config_arg)
+	})))
+}
+
+fn overview_targets(config_arg: Option<&str>, active: &TargetContext) -> Result<OverviewTargets, CliError> {
+	let mut targets = Vec::new();
+	if let Some(path) = wikid_server::config::discover(config_arg.map(Path::new)) {
+		let config =
+			wikid_server::Config::load(&path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+		if !active.configured {
+			warn_insecure_config(&path, &config);
+		}
+		for (name, path) in config.wikis {
+			targets.push(OverviewTarget::Local {
+				active: false,
+				default: config.default_wiki.as_deref() == Some(&name),
+				configured: true,
+				name,
+				path: path.display().to_string(),
+			});
+		}
+		for (name, remote) in config.remotes {
+			targets.push(OverviewTarget::Remote {
+				active: false,
+				default: config.default_wiki.as_deref() == Some(&name),
+				configured: true,
+				wiki: remote.wiki.unwrap_or_else(|| name.clone()),
+				name,
+				server: remote.server,
+			});
+		}
+	}
+	let matching = targets
+		.iter()
+		.enumerate()
+		.filter(|(_, target)| {
+			if active.configured {
+				target.name() == active.name && target.matches_context(active)
+			} else {
+				target.matches_context(active)
+			}
+		})
+		.map(|(index, _)| index)
+		.collect::<Vec<_>>();
+	let matched_config = if matching.len() == 1 {
+		let target = &mut targets[matching[0]];
+		target.set_active(true);
+		Some(MatchedConfigTarget {
+			name: target.name().to_owned(),
+			is_default: target.is_default(),
+		})
+	} else {
+		targets.push(active.synthetic_overview_target());
+		None
+	};
+	targets.sort_by(|left, right| {
+		right
+			.is_active()
+			.cmp(&left.is_active())
+			.then_with(|| left.name().cmp(right.name()))
+	});
+	Ok(OverviewTargets {
+		targets,
+		matched_config,
+	})
+}
+
+fn render_overview(result: &OverviewResult, active: &TargetContext, config_arg: Option<&str>) -> String {
+	let name_width = result
+		.targets
+		.iter()
+		.map(|target| target.name().len())
+		.max()
+		.unwrap_or(1);
+	let mut lines = vec!["targets:".to_owned()];
+	for target in &result.targets {
+		match target {
+			OverviewTarget::Local {
+				name,
+				path,
+				active,
+				default,
+				..
+			} => {
+				let marker = if *active { '*' } else { ' ' };
+				let tags = overview_tags(*active, *default);
+				lines.push(format!("{marker} {name:name_width$}  local   {path}{tags}"));
+			}
+			OverviewTarget::Remote {
+				name,
+				server,
+				wiki,
+				active,
+				default,
+				..
+			} => {
+				let marker = if *active { '*' } else { ' ' };
+				let tags = overview_tags(*active, *default);
+				lines.push(format!(
+					"{marker} {name:name_width$}  remote  {server}  wiki={wiki}{tags}"
+				));
+			}
+		}
+	}
+	lines.push(String::new());
+	lines.push(format!("active: {}", active.name));
+	match &active.kind {
+		TargetKind::Local { .. } => lines.push(format!("wikid: {}", env!("CARGO_PKG_VERSION"))),
+		TargetKind::Remote { .. } => lines.push(format!(
+			"wikid: client {}  server {}",
+			env!("CARGO_PKG_VERSION"),
+			result.status.version
+		)),
+	}
+	lines.push(render::status_body(&result.status));
+	lines.push(String::new());
+	lines.push("hint: wikid skills get core — start here: load the agent usage guide".to_owned());
+	let switch = match config_arg {
+		Some(config) => format!("wikid --config {} --target <name>", shell_arg(config)),
+		None => "wikid --target <name>".to_owned(),
+	};
+	lines.push(format!("hint: {switch} — inspect another target"));
+	lines.push("hint: wikid grep <pattern> — search the active wiki".to_owned());
+	lines.push("hint: wikid doctor — inspect structural issues".to_owned());
+	active.with_target_hints(lines.join("\n"))
+}
+
+fn overview_tags(active: bool, default: bool) -> &'static str {
+	match (active, default) {
+		(true, true) => "  [active, default]",
+		(true, false) => "  [active]",
+		(false, true) => "  [default]",
+		(false, false) => "",
+	}
 }
 
 fn load_or_bootstrap_config(
@@ -765,25 +1229,39 @@ fn resolve_config_target(
 		.map_err(io_error)?
 		.canonicalize()
 		.map_err(io_error)?;
-	if let Some((_, local_path)) = config
+	if let Some((name, local_path)) = config
 		.wikis
 		.iter()
 		.filter_map(|(name, path)| path.canonicalize().ok().map(|path| (name, path)))
 		.filter(|(_, path)| cwd.starts_with(path))
 		.max_by_key(|(_, path)| path.components().count())
 	{
-		return Ok(Some(ConfigTarget::Local(local_path)));
+		return Ok(Some(ConfigTarget::Local {
+			name: name.clone(),
+			path: local_path,
+			is_default: config.default_wiki.as_deref() == Some(name),
+		}));
 	}
 	let target_count = config.wikis.len() + config.remotes.len();
 	if target_count == 0 {
 		return Ok(None);
 	}
 	if target_count == 1 {
-		if let Some(local_path) = config.wikis.values().next() {
-			return Ok(Some(ConfigTarget::Local(local_path.clone())));
+		if let Some((name, local_path)) = config.wikis.iter().next() {
+			return Ok(Some(ConfigTarget::Local {
+				name: name.clone(),
+				path: local_path.clone(),
+				is_default: config.default_wiki.as_deref() == Some(name),
+			}));
 		}
 		let (name, remote) = config.remotes.iter().next().unwrap();
-		return Ok(Some(remote_config_target(name, remote, token_override, token_fallback)));
+		return Ok(Some(remote_config_target(
+			name,
+			remote,
+			token_override,
+			token_fallback,
+			config.default_wiki.as_deref() == Some(name),
+		)));
 	}
 	if let Some(default) = &config.default_wiki
 		&& (config.wikis.contains_key(default) || config.remotes.contains_key(default))
@@ -793,8 +1271,11 @@ fn resolve_config_target(
 	let names = config_target_names(&config).join(", ");
 	Err(CliError::new(
 		"ambiguous_wiki",
-		format!("multiple local/remote wikis registered: {names}"),
-		Some(format!("set default_wiki in {} or pass --dir/--wiki", path.display())),
+		format!("multiple local/remote targets registered: {names}"),
+		Some(format!(
+			"set default_wiki in {} or run wikid --target <name>",
+			path.display()
+		)),
 	))
 }
 
@@ -805,25 +1286,36 @@ fn named_config_target(
 	token_fallback: Option<String>,
 	config_path: &Path,
 ) -> Result<ConfigTarget, CliError> {
+	let is_default = config.default_wiki.as_deref() == Some(name);
 	match (config.wikis.get(name), config.remotes.get(name)) {
 		(Some(_), Some(_)) => Err(CliError::new(
 			"ambiguous_wiki",
-			format!("wiki name {name:?} is configured as both local and remote"),
+			format!("target name {name:?} is configured as both local and remote"),
 			Some(format!(
 				"rename one of the duplicate targets in {}",
 				config_path.display()
 			)),
 		)),
-		(Some(path), None) => Ok(ConfigTarget::Local(path.clone())),
-		(None, Some(remote)) => Ok(remote_config_target(name, remote, token_override, token_fallback)),
+		(Some(path), None) => Ok(ConfigTarget::Local {
+			name: name.to_owned(),
+			path: path.clone(),
+			is_default,
+		}),
+		(None, Some(remote)) => Ok(remote_config_target(
+			name,
+			remote,
+			token_override,
+			token_fallback,
+			is_default,
+		)),
 		(None, None) => Err(CliError::new(
 			"unknown_wiki",
 			format!(
-				"unknown configured wiki {name:?}; available: {}",
+				"unknown configured target {name:?}; available: {}",
 				config_target_names(config).join(", ")
 			),
 			Some(format!(
-				"inspect [wikis]/[remotes] in {}; --wiki alone selects config, so also pass --server for a daemon wiki",
+				"run wikid config list --config {}; use --server with --wiki for a direct daemon wiki",
 				config_path.display()
 			)),
 		)),
@@ -835,11 +1327,16 @@ fn remote_config_target(
 	remote: &wikid_server::config::RemoteProfile,
 	token_override: Option<String>,
 	token_fallback: Option<String>,
+	is_default: bool,
 ) -> ConfigTarget {
+	let has_token_override = token_override.is_some();
 	ConfigTarget::Remote {
+		name: name.to_owned(),
 		server: remote.server.clone(),
 		token: token_override.or_else(|| remote.token.clone()).or(token_fallback),
 		wiki: remote.wiki.clone().unwrap_or_else(|| name.to_owned()),
+		is_default,
+		token_override: has_token_override,
 	}
 }
 
@@ -920,7 +1417,7 @@ fn render_config_list(result: &ConfigListResult) -> String {
 		"total: {} {target_label} ({local_count} local, {remote_count} remote)",
 		result.targets.len()
 	));
-	lines.push("hint: wikid --wiki <name> status — inspect one configured target".to_owned());
+	lines.push("hint: wikid --target <name> status — inspect one configured target".to_owned());
 	lines.join("\n")
 }
 
@@ -1023,8 +1520,8 @@ Run `wikid skills get core` before using the CLI; it is the version-matched usag
 "#;
 
 /// The targeted wiki: a local directory or a remote daemon. Both expose the
-/// same operations returning the shared core structs, so `dispatch` renders
-/// identically in either mode (DESIGN §6).
+/// same operations and shared core structs; the client human view adds target
+/// provenance while JSON keeps the operation wire shapes (DESIGN §6).
 enum Backend {
 	Local(Vault),
 	Remote(Remote),
@@ -1173,8 +1670,8 @@ fn md_extension_hint(vault: &Vault, requested: &str) -> Option<String> {
 	full_path.is_file().then(|| format!("did you mean {candidate}?"))
 }
 
-fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, CliError> {
-	match command {
+fn dispatch(backend: &Backend, target: &TargetContext, command: Command, json: bool) -> Result<Outcome, CliError> {
+	let result: Result<Outcome, CliError> = match command {
 		Command::Skills { .. }
 		| Command::Serve
 		| Command::Init { .. }
@@ -1183,9 +1680,7 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 		| Command::Update { .. } => unreachable!("handled in run()"),
 		Command::Status => {
 			let status = backend.status()?;
-			Ok(Outcome::ok(emit(json, &status, || {
-				render::status(&status, matches!(backend, Backend::Remote(_)))
-			})))
+			Ok(Outcome::ok(emit(json, &status, || target.focused_status(&status))))
 		}
 		Command::Ls { path } => {
 			let listing = backend.ls(path.as_deref(), 1)?;
@@ -1287,7 +1782,12 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 			let report = backend.doctor(stale_days, checks.as_deref(), profile)?;
 			Ok(Outcome::ok(emit(json, &report, || render::doctor(&report))))
 		}
+	};
+	let mut outcome = result?;
+	if !json {
+		outcome.text = target.with_target_hints(outcome.text);
 	}
+	Ok(outcome)
 }
 
 /// `--json` emits the core result struct directly; human mode renders it.

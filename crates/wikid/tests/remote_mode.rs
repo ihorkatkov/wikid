@@ -1,7 +1,7 @@
 //! End-to-end remote mode (DESIGN §8): spawn the compiled binary's `serve` on
 //! an ephemeral port with a temp config + token, run the CLI in remote mode
-//! against it, and assert output parity with local mode on the same vault —
-//! human and `--json` alike, including exit codes and error rendering.
+//! against it, and assert operation/JSON parity with local mode while human
+//! hints and status identity preserve each target's routing context.
 
 use std::fs;
 use std::net::TcpListener;
@@ -162,13 +162,32 @@ fn run_cli(mut cmd: Command, args: &[&str]) -> (String, i32) {
 	)
 }
 
-/// Asserts a command renders byte-identically in both modes (human and
-/// `--json`) with the same exit code. Only safe for non-mutating commands —
-/// both invocations hit the same vault.
+fn without_hints(output: &str) -> String {
+	output
+		.lines()
+		.filter(|line| !line.starts_with("hint:"))
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
+fn status_data(output: &str) -> String {
+	without_hints(output)
+		.lines()
+		.skip_while(|line| !line.starts_with("pages:"))
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
+/// Asserts operation content and JSON parity in both modes with the same exit
+/// code. Human hints intentionally differ because each repeats its target.
 fn assert_read_parity(vault: &Path, base: &str, args: &[&str]) {
 	let (local_out, local_code) = local(vault, args);
 	let (remote_out, remote_code) = remote(base, args);
-	assert_eq!(remote_out, local_out, "human parity for {args:?}");
+	assert_eq!(
+		without_hints(&remote_out),
+		without_hints(&local_out),
+		"operation content parity for {args:?}"
+	);
 	assert_eq!(remote_code, local_code, "exit code parity for {args:?}");
 	let mut json_args = args.to_vec();
 	json_args.push("--json");
@@ -221,9 +240,8 @@ fn init_then_serve_then_remote_status_end_to_end() {
 		])
 		.assert()
 		.success()
-		.stdout(predicates::str::contains(
-			vault.path().canonicalize().unwrap().display().to_string(),
-		));
+		.stdout(predicates::str::contains(format!("target: {wiki} (direct remote)")))
+		.stdout(predicates::str::contains(format!("server: {}", server.base)));
 }
 
 #[test]
@@ -235,18 +253,20 @@ fn remote_mode_matches_local_mode_end_to_end() {
 	let (local_status, local_code) = local(vault.path(), &["status"]);
 	let (remote_status, remote_code) = remote(base, &["status"]);
 	assert_eq!(remote_code, local_code, "status exit code parity");
-	assert!(local_status.contains("\nroot: "), "{local_status}");
-	assert!(remote_status.contains("\nroot (server): "), "{remote_status}");
-	assert_eq!(
-		remote_status.replace("root (server):", "root:"),
-		local_status,
-		"remote status differs only by server-side root label"
+	assert!(local_status.contains(" (local)\nroot: "), "{local_status}");
+	assert!(
+		remote_status.contains("target: main (direct remote)"),
+		"{remote_status}"
 	);
+	assert!(remote_status.contains(&format!("server: {base}")), "{remote_status}");
+	assert!(!remote_status.contains("root:"), "{remote_status}");
+	assert_eq!(status_data(&remote_status), status_data(&local_status));
 	let (local_status_json, _) = local(vault.path(), &["status", "--json"]);
 	let (remote_status_json, _) = remote(base, &["status", "--json"]);
 	assert_eq!(remote_status_json, local_status_json, "status --json parity");
 
-	// Other read commands: identical rendering, totals, hints, and exit codes.
+	// Other read commands: identical content/totals/exit codes; hints preserve
+	// their local or remote target.
 	let read_commands: &[&[&str]] = &[
 		&["ls"],
 		&["ls", "notes"],
@@ -281,7 +301,11 @@ fn remote_mode_matches_local_mode_end_to_end() {
 	local(vault.path(), &["rm", "drafts/e2e.md", "--force"]);
 	let (local_write, code) = local(vault.path(), &["write", "drafts/e2e.md", "-m", "written remotely"]);
 	assert_eq!(code, 0);
-	assert_eq!(remote_write, local_write, "write parity");
+	assert_eq!(
+		without_hints(&remote_write),
+		without_hints(&local_write),
+		"write parity"
+	);
 
 	// edit: a same-length swap back and forth keeps byte counts (and thus the
 	// rendered output) identical across the two invocations.
@@ -315,7 +339,7 @@ fn remote_mode_matches_local_mode_end_to_end() {
 		],
 	);
 	assert_eq!(code, 0);
-	assert_eq!(remote_edit, local_edit, "edit parity");
+	assert_eq!(without_hints(&remote_edit), without_hints(&local_edit), "edit parity");
 
 	// edit-batch: JSON-stdin batches go through the same HTTP edit endpoint.
 	let alpha_hash = wikid_core::hash_line("# Alpha");
@@ -373,7 +397,7 @@ fn remote_mode_matches_local_mode_end_to_end() {
 	local(vault.path(), &["mv", "notes/alpha2.md", "notes/alpha.md"]);
 	let (local_mv, code) = local(vault.path(), &["mv", "notes/alpha.md", "notes/alpha2.md"]);
 	assert_eq!(code, 0);
-	assert_eq!(remote_mv, local_mv, "mv parity");
+	assert_eq!(without_hints(&remote_mv), without_hints(&local_mv), "mv parity");
 	local(vault.path(), &["mv", "notes/alpha2.md", "notes/alpha.md"]);
 	let (remote_mv_json, code) = remote(base, &["mv", "notes/alpha.md", "notes/alpha2.md", "--json"]);
 	assert_eq!(code, 0);
@@ -405,7 +429,7 @@ fn remote_mode_matches_local_mode_end_to_end() {
 	local(vault.path(), &["write", "notes/beta.md", "-m", "temp"]);
 	let (local_rm, code) = local(vault.path(), &["rm", "notes/beta.md", "--force"]);
 	assert_eq!(code, 0);
-	assert_eq!(remote_rm, local_rm, "rm parity");
+	assert_eq!(without_hints(&remote_rm), without_hints(&local_rm), "rm parity");
 
 	// Core errors travel the wire and render exactly like local mode.
 	let (remote_err, remote_code) = remote(base, &["cat", "nope.md"]);
@@ -460,9 +484,127 @@ fn config_named_remote_profile_targets_the_daemon() {
 		let output = cmd.args(args).output().unwrap();
 		assert_eq!(output.status.code(), Some(0), "profile must reach daemon");
 		let stdout = String::from_utf8(output.stdout).unwrap();
-		assert!(stdout.contains("root (server):"), "{stdout}");
-		assert!(stdout.contains(&vault.path().canonicalize().unwrap().display().to_string()));
+		assert!(stdout.contains("target: projects (remote, default)"), "{stdout}");
+		assert!(stdout.contains("wiki: main"), "{stdout}");
+		assert!(stdout.contains(&format!("server: {}", server.base)), "{stdout}");
+		assert!(!stdout.contains("root:"), "{stdout}");
 	}
+}
+
+#[test]
+fn bare_dashboard_lists_all_targets_and_target_flag_keeps_hints_routed() {
+	let remote_vault = fixture_vault();
+	let server = spawn_server(remote_vault.path());
+	let local_vault = fixture_vault();
+	let config_dir = TempDir::new().unwrap();
+	let config_path = config_dir.path().join("client.toml");
+	write_private_config(
+		&config_path,
+		&format!(
+			"default_wiki = \"projects\"\n[wikis]\nlocal = {:?}\n[remotes.archive]\nserver = \"https://archive.example\"\nwiki = \"projects\"\n[remotes.projects]\nserver = {:?}\ntoken = {TOKEN:?}\nwiki = {WIKI:?}\n",
+			local_vault.path().display().to_string(),
+			server.base
+		),
+	);
+
+	let mut dashboard = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut dashboard);
+	let output = dashboard
+		.current_dir(config_dir.path())
+		.args(["--config", config_path.to_str().unwrap()])
+		.output()
+		.unwrap();
+	assert!(output.status.success());
+	let human = String::from_utf8(output.stdout).unwrap();
+	assert!(human.starts_with("targets:\n"), "{human}");
+	assert!(
+		human.contains("archive   remote  https://archive.example  wiki=projects"),
+		"{human}"
+	);
+	assert!(human.contains("local     local"), "{human}");
+	assert!(human.contains("projects  remote"), "{human}");
+	assert!(human.contains("[active, default]"), "{human}");
+	assert!(human.contains("\nactive: projects\n"), "{human}");
+	assert!(!human.contains(TOKEN), "dashboard leaked token: {human}");
+	let hints = human
+		.lines()
+		.filter(|line| line.starts_with("hint:"))
+		.collect::<Vec<_>>();
+	assert_eq!(hints.len(), 4, "{human}");
+	assert_eq!(
+		hints[0],
+		"hint: wikid skills get core — start here: load the agent usage guide"
+	);
+	assert!(hints[1].contains("--target <name>"), "{human}");
+	assert!(hints[2].contains("--target projects grep <pattern>"), "{human}");
+	assert!(hints[3].contains("--target projects doctor"), "{human}");
+
+	let mut dashboard_json = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut dashboard_json);
+	let output = dashboard_json
+		.current_dir(config_dir.path())
+		.args(["--config", config_path.to_str().unwrap(), "--json"])
+		.output()
+		.unwrap();
+	assert!(output.status.success());
+	let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+	assert_eq!(json["active_target"], "projects");
+	assert_eq!(json["targets"].as_array().unwrap().len(), 3);
+	assert_eq!(json["status"]["total_pages"], 3);
+	assert!(!json.to_string().contains(TOKEN));
+
+	// Legacy ambient direct-remote env that exactly matches a profile is
+	// presented as that profile once, not duplicated as a synthetic target.
+	let mut ambient_json = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut ambient_json);
+	let output = ambient_json
+		.current_dir(config_dir.path())
+		.env("WIKID_SERVER", &server.base)
+		.env("WIKID_TOKEN", TOKEN)
+		.env("WIKID_WIKI", WIKI)
+		.args(["--config", config_path.to_str().unwrap(), "--json"])
+		.output()
+		.unwrap();
+	let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+	assert_eq!(json["targets"].as_array().unwrap().len(), 3);
+	assert_eq!(json["active_target"], "projects");
+	let active = json["targets"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.find(|target| target["active"] == true)
+		.unwrap();
+	assert_eq!(active["name"], "projects");
+	assert_eq!(active["configured"], true);
+
+	let mut selected = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut selected);
+	selected
+		.args(["--config", config_path.to_str().unwrap(), "--target", "projects", "ls"])
+		.assert()
+		.success()
+		.stdout(predicates::str::contains("hint: wikid --config"))
+		.stdout(predicates::str::contains("--target projects cat <path>"));
+
+	let mut status_json = Command::cargo_bin("wikid").unwrap();
+	clear_env(&mut status_json);
+	let output = status_json
+		.args([
+			"--config",
+			config_path.to_str().unwrap(),
+			"--target",
+			"projects",
+			"status",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+	assert!(
+		json.get("targets").is_none(),
+		"explicit status JSON must remain VaultStatus"
+	);
+	assert_eq!(json["total_pages"], 3);
 }
 
 #[test]
@@ -487,7 +629,8 @@ fn unified_profile_resolution_honors_defaults_names_env_precedence_and_cwd() {
 		.args(["--config", config_path.to_str().unwrap(), "status"])
 		.assert()
 		.success()
-		.stdout(predicates::str::contains("root (server):"));
+		.stdout(predicates::str::contains("target: projects (remote, default)"))
+		.stdout(predicates::str::contains("wiki: main"));
 
 	// A named config target wins over opposite-mode env vars.
 	let mut local_cmd = Command::cargo_bin("wikid").unwrap();
@@ -500,7 +643,7 @@ fn unified_profile_resolution_honors_defaults_names_env_precedence_and_cwd() {
 	assert!(local_output.status.success());
 	let local_stdout = String::from_utf8(local_output.stdout).unwrap();
 	assert!(local_stdout.contains(&local_vault.path().canonicalize().unwrap().display().to_string()));
-	assert!(!local_stdout.contains("root (server):"));
+	assert!(local_stdout.contains("target: local (local)"), "{local_stdout}");
 
 	let mut remote_cmd = Command::cargo_bin("wikid").unwrap();
 	clear_env(&mut remote_cmd);
@@ -517,7 +660,7 @@ fn unified_profile_resolution_honors_defaults_names_env_precedence_and_cwd() {
 		])
 		.assert()
 		.success()
-		.stdout(predicates::str::contains("root (server):"));
+		.stdout(predicates::str::contains("target: projects (remote, default)"));
 
 	// Cwd-prefix local discovery intentionally beats a remote default.
 	let mut cwd_cmd = Command::cargo_bin("wikid").unwrap();
@@ -528,7 +671,11 @@ fn unified_profile_resolution_honors_defaults_names_env_precedence_and_cwd() {
 		.output()
 		.unwrap();
 	assert!(cwd_output.status.success());
-	assert!(!String::from_utf8(cwd_output.stdout).unwrap().contains("root (server):"));
+	assert!(
+		String::from_utf8(cwd_output.stdout)
+			.unwrap()
+			.contains("target: local (local)")
+	);
 
 	let mut unknown = Command::cargo_bin("wikid").unwrap();
 	clear_env(&mut unknown);
@@ -574,7 +721,7 @@ fn profile_name_defaults_to_daemon_wiki_and_env_token_fills_an_absent_token() {
 		.args(["--config", config_path.to_str().unwrap(), "--wiki", WIKI, "status"])
 		.assert()
 		.success()
-		.stdout(predicates::str::contains("root (server):"));
+		.stdout(predicates::str::contains("target: main (remote)"));
 }
 
 #[test]
@@ -637,7 +784,7 @@ fn exposed_token_config_warns_on_stderr_without_corrupting_json() {
 }
 
 /// Remote targeting purely via `WIKID_SERVER`/`WIKID_TOKEN`/`WIKID_WIKI` env
-/// vars — no flags — reaches the daemon and labels `root` as server-side.
+/// vars reaches the daemon and omits its non-actionable root in human status.
 #[test]
 fn env_vars_alone_target_the_remote_daemon() {
 	let vault = fixture_vault();
@@ -655,11 +802,9 @@ fn env_vars_alone_target_the_remote_daemon() {
 	assert_eq!(output.status.code(), Some(0), "env-var targeting must reach the daemon");
 	let remote_out = String::from_utf8(output.stdout).unwrap();
 	let (local_out, _) = local(vault.path(), &["status"]);
-	assert_eq!(
-		remote_out.replace("root (server):", "root:"),
-		local_out,
-		"env-var remote status matches local except server-side root label"
-	);
+	assert!(remote_out.contains("target: main (direct remote)"), "{remote_out}");
+	assert!(!remote_out.contains("root:"), "{remote_out}");
+	assert_eq!(status_data(&remote_out), status_data(&local_out));
 
 	// An explicit token still composes with an env-provided server/wiki, as it
 	// did before named profiles existed.

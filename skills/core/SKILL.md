@@ -24,8 +24,9 @@ wiki = "shared"
 ```
 
 ```sh
-wikid config list                 # discover configured local and remote target names
-wikid --wiki team status
+wikid                             # all targets, active target status, and next steps
+wikid config list                 # detailed token-safe target inventory
+wikid --target team status        # focused status for one configured target
 ```
 
 The `wiki` and `token` profile fields are optional: `wiki` defaults to the profile name, and tokenless profiles support auth-less loopback daemons. Direct environment targeting remains available:
@@ -34,16 +35,17 @@ The `wiki` and `token` profile fields are optional: `wiki` defaults to the profi
 WIKID_SERVER=http://127.0.0.1:7448 WIKID_TOKEN=wkd_... WIKID_WIKI=team wikid status
 ```
 
-If no target flags are passed, wikid uses config discovery across local `[wikis]` and client `[remotes]`. `default_wiki` can name either kind. Bare `wikid` is the same as `wikid status`. `--wiki` without an explicit `--server` always selects a config target and ignores `WIKID_SERVER`; pass both flags to override the wiki on an env-configured daemon. A profile without `token` falls back to `WIKID_TOKEN`, so unset it when no Authorization header should be sent. On Unix, fix any token-config permission warning with `chmod 600 <config-path>`; warnings go to stderr and do not alter JSON stdout.
+If no target flags are passed, wikid uses config discovery across local `[wikis]` and client `[remotes]`; `default_wiki` can name either kind. Bare `wikid` is an orientation dashboard listing every configured target and the active target's status. Explicit `wikid status` is the focused view. Use `--target <name>` for configured targets. For compatibility, `--wiki` without explicit `--server` remains a config-target alias; with `--server`, it names the daemon wiki. A profile without `token` falls back to `WIKID_TOKEN`, so unset it when no Authorization header should be sent. On Unix, fix token-config permission warnings with `chmod 600 <config-path>`; warnings stay on stderr.
 
 Command names covered by this guide and its full references: skills, serve, init, config, token, update, status, ls, tree, cat, grep, glob, write, edit, edit-batch, mv, rm, links, tags, doctor.
 
 ## 1. Orient before changing anything
 
-Start with status, then discover paths, then search content.
+Start with bare `wikid` to discover every available target and load this guide when its first hint says `wikid skills get core`. Then focus a target, discover paths, and search content.
 
 ```sh
-wikid status
+wikid
+wikid --target team status
 wikid ls
 wikid tree concepts --depth 2
 wikid glob '**/*.md'
@@ -53,9 +55,17 @@ wikid grep 'payment provider' -i
 Expected excerpts:
 
 ```text
-wiki: team
+targets:
+* team      remote  https://wiki.example.com  wiki=shared  [active, default]
+  personal  local   /home/me/notes
+
+active: team
+wikid: client <client-version>  server <server-version>
 pages: 42  files: 7  size: 156.4 KiB
 health: 0 high  2 medium  9 low
+...
+hint: wikid skills get core — start here: load the agent usage guide
+hint: wikid --target <name> — inspect another target
 ```
 
 ```text

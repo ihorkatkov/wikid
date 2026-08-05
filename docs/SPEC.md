@@ -51,7 +51,7 @@ Commands (CLI verbs ≙ MCP tools ≙ HTTP endpoints):
 
 | Command | Behavior |
 |---|---|
-| `status` | Content-first, no-arg default: wikis served, page counts, recently modified, health summary. (AXI #8) |
+| bare `wikid` / `status` | Bare orientation lists every configured target plus active/default state and active status; explicit `status` is the focused target view. Both remain content-first. (AXI #8) |
 | `ls [path]` / `tree` | List pages/directories; includes total counts. (AXI #4) |
 | `cat <path>` | Read a page. Large files truncated with size hint + `--full`; line windows with `--lines START-END` keep oversized files workable without loading them whole. (AXI #3) |
 | `grep <pattern>` | Search content; ranked-lite (title/path matches boosted), match context, total hit count, explicit zero-result message. (AXI #5) |

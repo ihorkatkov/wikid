@@ -38,24 +38,13 @@ fn severity_name(severity: Severity) -> &'static str {
 	}
 }
 
-pub fn status(status: &VaultStatus, remote: bool) -> String {
-	let wiki_name = status
-		.root
-		.rsplit(['/', '\\'])
-		.find(|part| !part.is_empty())
-		.unwrap_or("selected");
-	let root_label = if remote { "root (server)" } else { "root" };
-	let mut lines = vec![
-		format!("wiki: {wiki_name}"),
-		format!("version: {}", status.version),
-		format!("{root_label}: {}", status.root),
-		format!(
-			"pages: {}  files: {}  size: {}",
-			status.total_pages,
-			status.total_files,
-			human_size(status.total_bytes)
-		),
-	];
+pub fn status_body(status: &VaultStatus) -> String {
+	let mut lines = vec![format!(
+		"pages: {}  files: {}  size: {}",
+		status.total_pages,
+		status.total_files,
+		human_size(status.total_bytes)
+	)];
 	let health = &status.doctor_summary;
 	lines.push(format!(
 		"health: {} high  {} medium  {} low",
@@ -67,8 +56,6 @@ pub fn status(status: &VaultStatus, remote: bool) -> String {
 			lines.push(format!("  {}  {}", page.modified, page.path));
 		}
 	}
-	lines.push("hint: wikid grep <pattern> — search this wiki".to_string());
-	lines.push("hint: wikid doctor — inspect structural issues".to_string());
 	lines.join("\n")
 }
 

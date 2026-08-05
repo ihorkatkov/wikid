@@ -4,6 +4,7 @@
 
 - [Global rules](#global-rules)
 - [skills](#skills)
+- [bare overview](#bare-overview)
 - [status](#status)
 - [ls and tree](#ls-and-tree)
 - [cat](#cat)
@@ -28,7 +29,7 @@
 
 Every command accepts `--json`. Success output is one JSON object on stdout. Errors are also stdout and exit 1. Usage errors are clap errors and exit 2.
 
-Optional fields are omitted when absent. Human `hint:` lines do not appear in JSON success output. Selecting a local wiki or named `[remotes.<name>]` profile does not change any command's JSON shape. On Unix, an exposed token-bearing config may produce a permission warning on stderr; stdout remains exactly one JSON object.
+Optional fields are omitted when absent. Human `hint:` lines do not appear in JSON success output. Selecting a local wiki or named `[remotes.<name>]` profile does not change explicit operation-command JSON shapes. Bare `wikid --json` is the client overview envelope documented below. On Unix, an exposed token-bearing config may produce a permission warning on stderr; stdout remains exactly one JSON object.
 
 ## skills
 
@@ -85,9 +86,19 @@ Fields:
 - `wiring`: Claude skill symlinks that point into the wikid skills cache.
 - `wiring[].state`: `ok` when routed through `current`, `pinned` when linked to a concrete version, `broken` when the symlink target is missing.
 
+## bare overview
+
+Bare `wikid --json` lists token-safe target metadata and nests the active target's wire status:
+
+```json
+{"targets":[{"kind":"remote","name":"team","server":"https://wiki.example","wiki":"shared","active":true,"default":true,"configured":true},{"kind":"local","name":"notes","path":"/home/me/notes","active":false,"default":false,"configured":true}],"active_target":"team","status":{"version":"<server-version>","root":"/server/wiki","total_pages":3,"total_files":1,"total_bytes":1200,"recent":[],"doctor_summary":{"high":0,"medium":0,"low":1}}}
+```
+
+Target entries contain no token values or token-presence metadata. `active_target` names the resolved target. `status` is the unchanged `VaultStatus`; for a remote target its `version` and `root` belong to the server.
+
 ## status
 
-`wikid status --json`:
+Explicit `wikid status --json` remains the bare `VaultStatus` object:
 
 ```json
 {
