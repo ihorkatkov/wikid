@@ -84,9 +84,11 @@ Read a page by wiki-root-relative path. Page paths need the `.md` extension.
 wikid cat concepts/billing.md
 ```
 
-Large reads are truncated by default:
+Large reads are truncated by default. In human output, the final standalone `---` marks where page content ends and CLI metadata/hints begin; the marker is not part of the page:
 
 ```text
+<page content>
+---
 … truncated (730 lines / 58421 bytes total) — use --full or --lines <START-END>
 hint: wikid cat concepts/billing.md --lines 1-120 — read a window
 ```

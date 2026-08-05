@@ -231,8 +231,9 @@ fn core_skill_documented_workflow_matches_real_cli_output() {
 		"cat --hashes output no longer matches skills/core/SKILL.md §3",
 	);
 	assert!(
-		hash_lines
-			.contains(&"hint: wikid edit concepts/billing.md --line <n> --hash <hash> --new=<text> — replace a line"),
+		hash_lines.iter().any(|line| {
+			line.ends_with(" edit concepts/billing.md --line <n> --hash <hash> --new=<text> — replace a line")
+		}),
 		"cat --hashes hint no longer matches skills/core/SKILL.md §3: {hashes}"
 	);
 
@@ -1364,11 +1365,17 @@ fn cat_hashes_lists_line_number_hash_and_text_with_the_edit_hint() {
 	let out = stdout_of(wikid(vault.path()).args(["cat", "notes/alpha.md", "--hashes"]));
 	let hash = wikid_core::hash_line("The needle is here.");
 	assert!(out.contains(&format!("3:{hash}: The needle is here.")), "{out}");
+	let hint_prefix = format!("hint: wikid --dir {}", vault.path().display());
 	assert!(
-		out.contains("hint: wikid edit notes/alpha.md --line <n> --hash <hash> --new=<text>"),
+		out.contains(&format!(
+			"{hint_prefix} edit notes/alpha.md --line <n> --hash <hash> --new=<text>"
+		)),
 		"{out}"
 	);
-	assert!(out.contains("hint: wikid edit-batch notes/alpha.md"), "{out}");
+	assert!(
+		out.contains(&format!("{hint_prefix} edit-batch notes/alpha.md")),
+		"{out}"
+	);
 }
 
 #[test]

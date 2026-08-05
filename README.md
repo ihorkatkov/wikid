@@ -168,7 +168,7 @@ Wiki operation commands work identically in local and remote mode. Client-side m
 | bare `wikid` | Orientation dashboard: all configured targets plus active target status and agent-guide hint |
 | `status` | Focused page counts, recent activity, health summary for one target |
 | `ls` / `tree` / `glob` | Find pages by path |
-| `cat` | Read a page or `#Heading` / `#^block-id` fragment (large whole-page reads truncated with a size hint; `--full` or `--lines START-END` to override) |
+| `cat` | Read a page or `#Heading` / `#^block-id` fragment; human output marks the content/CLI boundary with `---` (large reads truncate with `--full` or `--lines START-END` overrides) |
 | `grep` | Regex search with ranked results and match context |
 | `write` / `edit` / `edit-batch` | Create pages; hash-guarded line edits — a stale hash refuses the whole edit batch, so concurrent writers never silently clobber each other |
 | `mv` / `rm` | Rename and delete (`rm` requires `--force` — never an interactive prompt) |

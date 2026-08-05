@@ -684,9 +684,14 @@ struct TargetContext {
 
 impl TargetContext {
 	fn with_target_hints(&self, text: String) -> String {
-		text.lines()
-			.map(|line| {
-				let Some(command) = line.strip_prefix("hint: wikid ") else {
+		let lines = text.lines().collect::<Vec<_>>();
+		let document_boundary = lines.iter().rposition(|line| *line == render::CLI_OUTPUT_BOUNDARY);
+		lines
+			.into_iter()
+			.enumerate()
+			.map(|(index, line)| {
+				let in_cli_output = document_boundary.is_none_or(|boundary| index > boundary);
+				let Some(command) = in_cli_output.then(|| line.strip_prefix("hint: wikid ")).flatten() else {
 					return line.to_owned();
 				};
 				if command.starts_with("skills ")
@@ -1698,10 +1703,11 @@ fn dispatch(backend: &Backend, target: &TargetContext, command: Command, json: b
 		} => {
 			if hashes {
 				let result = backend.cat_hashes(&path, full, lines)?;
-				return Ok(Outcome::ok(emit(json, &result, || render::hashlines(&result))));
+				Ok(Outcome::ok(emit(json, &result, || render::hashlines(&result))))
+			} else {
+				let doc = backend.cat(&path, full, lines)?;
+				Ok(Outcome::ok(emit(json, &doc, || render::document(&doc))))
 			}
-			let doc = backend.cat(&path, full, lines)?;
-			Ok(Outcome::ok(emit(json, &doc, || render::document(&doc))))
 		}
 		Command::Grep {
 			pattern,
@@ -1835,6 +1841,27 @@ fn parse_checks(list: &str) -> Result<Vec<Check>, CliError> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn target_hint_routing_never_rewrites_document_content() {
+		let target = TargetContext {
+			name: "projects".to_owned(),
+			kind: TargetKind::Remote {
+				server: "https://wiki.example".to_owned(),
+				wiki: "shared".to_owned(),
+			},
+			configured: true,
+			is_default: true,
+			hint_prefix: "--target projects".to_owned(),
+		};
+		let output = target.with_target_hints(
+			"---\nhint: wikid links index.md — page content\n---\nhint: wikid links index.md — generated".to_owned(),
+		);
+		assert_eq!(
+			output,
+			"---\nhint: wikid links index.md — page content\n---\nhint: wikid --target projects links index.md — generated"
+		);
+	}
 
 	#[test]
 	fn cli_definition_is_consistent() {

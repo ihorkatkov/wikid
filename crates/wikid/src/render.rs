@@ -10,6 +10,8 @@ use wikid_core::{
 	LinkReport, Listing, MvResult, RmResult, Severity, TagReport, VaultStatus, WriteResult,
 };
 
+pub const CLI_OUTPUT_BOUNDARY: &str = "---";
+
 /// Formats bytes as a compact human size (B / KiB / MiB).
 fn human_size(bytes: u64) -> String {
 	const KIB: f64 = 1024.0;
@@ -77,6 +79,7 @@ pub fn document(doc: &Document) -> String {
 	if !doc.content.is_empty() {
 		lines.push(doc.content.strip_suffix('\n').unwrap_or(&doc.content).to_string());
 	}
+	lines.push(CLI_OUTPUT_BOUNDARY.to_string());
 	if let (Some(start), Some(end)) = (doc.range_start, doc.range_end) {
 		lines.push(format!(
 			"lines {start}-{end} of {} ({} bytes total)",
@@ -192,6 +195,7 @@ pub fn hashlines(result: &HashlinesResult) -> String {
 		.iter()
 		.map(|l| format!("{}:{}: {}", l.line, l.hash, l.text))
 		.collect();
+	lines.push(CLI_OUTPUT_BOUNDARY.to_string());
 	if let (Some(start), Some(end)) = (result.range_start, result.range_end) {
 		lines.push(format!(
 			"lines {start}-{end} of {} ({} bytes total)",
@@ -357,6 +361,43 @@ mod tests {
 	}
 
 	#[test]
+	fn document_output_separates_page_content_from_cli_metadata_and_hints() {
+		let doc = Document {
+			path: "index.md".to_string(),
+			content: "body\nhint: wikid links index.md — outgoing links and backlinks\n".to_string(),
+			truncated: false,
+			range_start: None,
+			range_end: None,
+			total_lines: 2,
+			total_bytes: 70,
+			modified: "2026-07-02T10:00:00Z".to_string(),
+		};
+		let out = document(&doc);
+		assert!(
+			out.contains(
+				"hint: wikid links index.md — outgoing links and backlinks\n---\nhint: wikid links index.md — outgoing links and backlinks"
+			),
+			"{out}"
+		);
+	}
+
+	#[test]
+	fn empty_document_still_marks_the_cli_output_boundary() {
+		let doc = Document {
+			path: "empty.md".to_string(),
+			content: String::new(),
+			truncated: false,
+			range_start: None,
+			range_end: None,
+			total_lines: 0,
+			total_bytes: 0,
+			modified: "2026-07-02T10:00:00Z".to_string(),
+		};
+		let out = document(&doc);
+		assert!(out.starts_with("---\n"), "{out}");
+	}
+
+	#[test]
 	fn document_truncation_marker_matches_the_axi_format() {
 		let doc = Document {
 			path: "big.md".to_string(),
@@ -506,7 +547,7 @@ mod tests {
 			modified: "2026-07-02T10:00:00Z".to_string(),
 		};
 		let out = hashlines(&result);
-		assert!(out.starts_with("1:abcdef012345: # Alpha"), "{out}");
+		assert!(out.starts_with("1:abcdef012345: # Alpha\n---"), "{out}");
 		assert!(
 			out.contains("… truncated (500 lines / 4242 bytes total) — use --full or --lines <START-END>"),
 			"{out}"

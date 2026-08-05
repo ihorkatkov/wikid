@@ -4,6 +4,8 @@ All notable user-facing changes to `wikid` are documented here.
 
 ## Unreleased
 
+## [0.4.0] - 2026-08-05
+
 ### Added
 
 - `--target <name>` as the unambiguous selector for configured local and remote targets; `--wiki` without `--server` remains a compatibility alias.
@@ -13,6 +15,11 @@ All notable user-facing changes to `wikid` are documented here.
 
 - Focused remote status now distinguishes target, daemon wiki, server URL, and client/server versions while omitting the non-actionable server filesystem root from human output.
 - Successful human next-step hints preserve the active target without exposing bearer tokens; explicit `status --json` retains its existing wire shape.
+
+### Fixed
+
+- Human `cat` now separates page content from generated metadata and hints with `---`, preventing content lines that begin with `hint:` from looking like duplicate CLI guidance or being rewritten by target-aware hint routing.
+- Release artifacts now include raw binaries and checksums alongside tarballs, restoring the asset contract used by the v0.3.0 self-updater.
 
 ## [0.3.0] - 2026-08-05
 
