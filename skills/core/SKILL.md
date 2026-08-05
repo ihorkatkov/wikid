@@ -24,6 +24,7 @@ wiki = "shared"
 ```
 
 ```sh
+wikid config list                 # discover configured local and remote target names
 wikid --wiki team status
 ```
 
@@ -35,7 +36,7 @@ WIKID_SERVER=http://127.0.0.1:7448 WIKID_TOKEN=wkd_... WIKID_WIKI=team wikid sta
 
 If no target flags are passed, wikid uses config discovery across local `[wikis]` and client `[remotes]`. `default_wiki` can name either kind. Bare `wikid` is the same as `wikid status`. `--wiki` without an explicit `--server` always selects a config target and ignores `WIKID_SERVER`; pass both flags to override the wiki on an env-configured daemon. A profile without `token` falls back to `WIKID_TOKEN`, so unset it when no Authorization header should be sent. On Unix, fix any token-config permission warning with `chmod 600 <config-path>`; warnings go to stderr and do not alter JSON stdout.
 
-Command names covered by this guide and its full references: skills, serve, init, token, update, status, ls, tree, cat, grep, glob, write, edit, edit-batch, mv, rm, links, tags, doctor.
+Command names covered by this guide and its full references: skills, serve, init, config, token, update, status, ls, tree, cat, grep, glob, write, edit, edit-batch, mv, rm, links, tags, doctor.
 
 ## 1. Orient before changing anything
 

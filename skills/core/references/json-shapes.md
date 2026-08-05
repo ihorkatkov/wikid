@@ -18,6 +18,7 @@
 - [tags](#tags)
 - [doctor](#doctor)
 - [init](#init)
+- [config list](#config-list)
 - [token show](#token-show)
 - [update](#update)
 - [serve startup](#serve-startup)
@@ -318,6 +319,16 @@ Fields:
   "skipped":["log.md"]
 }
 ```
+
+## config list
+
+`wikid config list --json`:
+
+```json
+{"config_path":"/home/me/.config/wikid/config.toml","bind":"127.0.0.1:7448","default_wiki":"team","targets":[{"kind":"local","name":"notes","path":"/home/me/notes"},{"kind":"remote","name":"team","server":"https://wiki.example","wiki":"shared"}]}
+```
+
+Targets are sorted by name. Local entries contain `kind`, `name`, and `path`; remote entries contain `kind`, `name`, `server`, and the effective daemon `wiki`. `default_wiki` is omitted when unset. Token values and token-presence metadata are never emitted.
 
 ## token show
 

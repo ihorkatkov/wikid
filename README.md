@@ -72,7 +72,11 @@ token = "wkd_..."
 wiki = "notes"
 ```
 
-Then use it by profile name (or set `default_wiki = "notes"` and omit `--wiki`):
+List every configured local wiki and remote server, then select a profile by name (or set `default_wiki = "notes"` and omit `--wiki`):
+
+```sh
+wikid config list
+```
 
 ```sh
 wikid --wiki notes status
@@ -134,6 +138,8 @@ token = "wkd_remote_secret"
 wiki = "projects"
 ```
 
+Inspect all configured local targets and remote servers with `wikid config list` (or `wikid config list --json`). Tokens are never included in this output.
+
 Keep configs containing tokens private (`chmod 600 ~/.config/wikid/config.toml`). On Unix, wikid warns on stderr if a discovered token-bearing config is group/world-accessible. A profile with no `token` falls back to ambient `WIKID_TOKEN`; unset it when the target must receive no Authorization header.
 
 Direct remote mode also exposes flag/env pairs:
@@ -150,11 +156,12 @@ With none of these set, wikid reads config and picks the local wiki containing t
 
 ## The surface
 
-Every command works identically in local and remote mode, and every command takes `--json`:
+Wiki operation commands work identically in local and remote mode. Client-side management commands such as `skills`, `config list`, and `update` do not contact a selected wiki; every command accepts `--json`:
 
 | Command | What it does |
 |---|---|
 | `skills` | Embedded agent usage guides: list, print, or materialize version-matched SKILL.md files |
+| `config list` | List configured local wiki targets and remote servers without revealing tokens |
 | `status` | Page counts, recent activity, health summary — the no-arg default |
 | `ls` / `tree` / `glob` | Find pages by path |
 | `cat` | Read a page or `#Heading` / `#^block-id` fragment (large whole-page reads truncated with a size hint; `--full` or `--lines START-END` to override) |

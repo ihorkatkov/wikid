@@ -2,6 +2,20 @@
 
 All notable user-facing changes to `wikid` are documented here.
 
+## [0.3.0] - 2026-08-05
+
+### Added
+
+- Client-side named remote profiles under `[remotes.<name>]`, with persistent server, optional bearer token, and optional daemon wiki settings.
+- Unified target selection across local `[wikis]` and remote profiles through `--wiki` and `default_wiki`.
+- `wikid config list` for a token-safe inventory of configured local wiki targets and remote servers, with matching JSON output.
+
+### Changed
+
+- Target precedence now keeps explicit local/direct-server flags authoritative while allowing named profiles to override ambient opposite-mode environment settings safely.
+- Unix clients warn on stderr when discovered token-bearing configs are accessible by group or other users, without corrupting JSON stdout.
+- Configuration rewrites preserve client-only remote profiles; documentation and embedded agent guidance now cover profile selection and token hygiene.
+
 ## [0.2.0] - 2026-07-08
 
 ### Added

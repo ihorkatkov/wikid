@@ -82,6 +82,15 @@ enum Command {
 	/// Initialize a blank LLM Wiki skeleton and register it in config
 	#[command(display_order = 20)]
 	Init { path: Option<String> },
+	/// Inspect configured local wikis and remote servers without revealing tokens
+	#[command(
+		display_order = 30,
+		long_about = "Inspect the discovered config's local wiki targets and remote server profiles. Token values are never printed; wiki target flags are ignored."
+	)]
+	Config {
+		#[command(subcommand)]
+		command: ConfigCommand,
+	},
 	/// Show configured tokens (explicit secret-revealing commands)
 	#[command(display_order = 30)]
 	Token {
@@ -219,6 +228,12 @@ enum SkillsCommand {
 }
 
 #[derive(Subcommand)]
+enum ConfigCommand {
+	/// List local wiki targets and remote server profiles
+	List,
+}
+
+#[derive(Subcommand)]
 enum TokenCommand {
 	/// Print the token for an actor from the local config
 	Show { actor: Option<String> },
@@ -278,6 +293,7 @@ fn run(cli: Cli) -> Result<Outcome, CliError> {
 		Command::Init { path } => {
 			return run_init(path.as_deref(), cli.dir.as_deref(), cli.config.as_deref(), cli.json);
 		}
+		Command::Config { command } => return run_config(command, cli.config.as_deref(), cli.json),
 		Command::Token { command } => return run_token(command, cli.config.as_deref(), cli.json),
 		Command::Update { check, force, version } => return run_update(check, force, version.as_deref(), cli.json),
 		other => other,
@@ -432,6 +448,38 @@ fn run_skills(command: Option<SkillsCommand>, json: bool) -> Result<Outcome, Cli
 	}
 }
 
+fn run_config(command: ConfigCommand, config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> {
+	match command {
+		ConfigCommand::List => {
+			let path = wikid_server::config::discover(config_arg.map(Path::new)).ok_or_else(CliError::no_config)?;
+			let config =
+				wikid_server::Config::load(&path).map_err(|err| CliError::new("config", format!("{err:#}"), None))?;
+			warn_insecure_config(&path, &config);
+			let mut targets = config
+				.wikis
+				.iter()
+				.map(|(name, path)| ConfigListTarget::Local {
+					name: name.clone(),
+					path: path.display().to_string(),
+				})
+				.chain(config.remotes.iter().map(|(name, remote)| ConfigListTarget::Remote {
+					name: name.clone(),
+					server: remote.server.clone(),
+					wiki: remote.wiki.clone().unwrap_or_else(|| name.clone()),
+				}))
+				.collect::<Vec<_>>();
+			targets.sort_by(|left, right| left.name().cmp(right.name()));
+			let result = ConfigListResult {
+				config_path: path.display().to_string(),
+				bind: config.bind,
+				default_wiki: config.default_wiki,
+				targets,
+			};
+			Ok(Outcome::ok(emit(json, &result, || render_config_list(&result))))
+		}
+	}
+}
+
 fn run_token(command: TokenCommand, config_arg: Option<&str>, json: bool) -> Result<Outcome, CliError> {
 	match command {
 		TokenCommand::Show { actor } => {
@@ -475,6 +523,30 @@ struct InitResult {
 	config_created: bool,
 	created: Vec<String>,
 	skipped: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigListResult {
+	config_path: String,
+	bind: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	default_wiki: Option<String>,
+	targets: Vec<ConfigListTarget>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum ConfigListTarget {
+	Local { name: String, path: String },
+	Remote { name: String, server: String, wiki: String },
+}
+
+impl ConfigListTarget {
+	fn name(&self) -> &str {
+		match self {
+			Self::Local { name, .. } | Self::Remote { name, .. } => name,
+		}
+	}
 }
 
 #[derive(Debug, Serialize)]
@@ -823,6 +895,35 @@ fn render_init(result: &InitResult) -> String {
 	lines.join("\n")
 }
 
+fn render_config_list(result: &ConfigListResult) -> String {
+	let mut lines = vec![
+		format!("config: {}", result.config_path),
+		format!("bind: {}", result.bind),
+		format!("default: {}", result.default_wiki.as_deref().unwrap_or("(none)")),
+	];
+	let mut local_count = 0;
+	let mut remote_count = 0;
+	for target in &result.targets {
+		match target {
+			ConfigListTarget::Local { name, path } => {
+				local_count += 1;
+				lines.push(format!("local  {name}  {path}"));
+			}
+			ConfigListTarget::Remote { name, server, wiki } => {
+				remote_count += 1;
+				lines.push(format!("remote  {name}  {server}  wiki={wiki}"));
+			}
+		}
+	}
+	let target_label = if result.targets.len() == 1 { "target" } else { "targets" };
+	lines.push(format!(
+		"total: {} {target_label} ({local_count} local, {remote_count} remote)",
+		result.targets.len()
+	));
+	lines.push("hint: wikid --wiki <name> status — inspect one configured target".to_owned());
+	lines.join("\n")
+}
+
 fn render_token(result: &TokenShowResult) -> String {
 	format!(
 		"{}\nhint: token for actor {:?} from {}",
@@ -1077,6 +1178,7 @@ fn dispatch(backend: &Backend, command: Command, json: bool) -> Result<Outcome, 
 		Command::Skills { .. }
 		| Command::Serve
 		| Command::Init { .. }
+		| Command::Config { .. }
 		| Command::Token { .. }
 		| Command::Update { .. } => unreachable!("handled in run()"),
 		Command::Status => {

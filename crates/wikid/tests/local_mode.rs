@@ -764,6 +764,49 @@ fn config_fallback_default_and_multi_wiki_ambiguity() {
 }
 
 #[test]
+fn config_list_reports_local_and_remote_targets_without_leaking_tokens() {
+	let local = fixture_vault();
+	let dir = TempDir::new().unwrap();
+	let config_path = dir.path().join("wikid.toml");
+	fs::write(
+		&config_path,
+		format!(
+			"bind = \"127.0.0.1:7448\"\ndefault_wiki = \"team\"\n[wikis]\nnotes = {:?}\n[remotes.team]\nserver = \"https://wiki.example\"\ntoken = \"never-print-me\"\nwiki = \"shared\"\n",
+			local.path().display().to_string()
+		),
+	)
+	.unwrap();
+
+	let json =
+		json_of(wikid_untargeted().args(["--config", config_path.to_str().unwrap(), "config", "list", "--json"]));
+	assert_eq!(json["config_path"], config_path.display().to_string());
+	assert_eq!(json["bind"], "127.0.0.1:7448");
+	assert_eq!(json["default_wiki"], "team");
+	assert_eq!(json["targets"][0]["name"], "notes");
+	assert_eq!(json["targets"][0]["kind"], "local");
+	assert_eq!(json["targets"][0]["path"], local.path().display().to_string());
+	assert_eq!(json["targets"][1]["name"], "team");
+	assert_eq!(json["targets"][1]["kind"], "remote");
+	assert_eq!(json["targets"][1]["server"], "https://wiki.example");
+	assert_eq!(json["targets"][1]["wiki"], "shared");
+	assert!(!json.to_string().contains("never-print-me"));
+
+	let human = stdout_of(wikid_untargeted().args(["--config", config_path.to_str().unwrap(), "config", "list"]));
+	assert!(human.contains("local  notes"), "{human}");
+	assert!(
+		human.contains("remote  team  https://wiki.example  wiki=shared"),
+		"{human}"
+	);
+	assert!(human.contains("total: 2 targets (1 local, 1 remote)"), "{human}");
+	assert!(
+		human
+			.trim_end()
+			.ends_with("hint: wikid --wiki <name> status — inspect one configured target")
+	);
+	assert!(!human.contains("never-print-me"));
+}
+
+#[test]
 fn explicit_local_flag_ignores_remote_env_and_explicit_remote_ignores_dir_env() {
 	let vault = fixture_vault();
 	wikid_untargeted()
@@ -1203,7 +1246,14 @@ fn grep_bad_regex_is_a_structured_error() {
 }
 
 #[test]
-fn concise_help_documents_obsidian_fragments_embeds_and_tags() {
+fn concise_help_documents_config_fragments_embeds_and_tags() {
+	let root_help = stdout_of(wikid_untargeted().arg("--help"));
+	assert!(root_help.contains("config"), "{root_help}");
+	let config_help = stdout_of(wikid_untargeted().args(["config", "list", "--help"]));
+	assert!(
+		config_help.contains("local wiki targets and remote server profiles"),
+		"{config_help}"
+	);
 	let cat_help = stdout_of(wikid_untargeted().args(["cat", "--help"]));
 	assert!(cat_help.contains("#Heading"), "{cat_help}");
 	assert!(cat_help.contains("#^block-id"), "{cat_help}");
